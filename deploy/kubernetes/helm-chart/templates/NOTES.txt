@@ -1,1 +1,9 @@
+Welcome! Sock Shop was deployed to namespace: {{ .Release.Namespace }}
 
+1) Check the pods:
+     kubectl get pods -n {{ .Release.Namespace }}
+
+2) Open the shop through the Traefik ingress, e.g.:
+     http://localhost:8079
+
+3) If you set ingress.host, add it to your hosts file and open it.

@@ -11,8 +11,8 @@ istio:
     enabled: false
 
 ingress:
-    annotations:
-        kubernetes.io/ingress.class: nginx
+    className: traefik
+    annotations: {}
     labels: {}
     host: ''
     tlsSecretName: ''
