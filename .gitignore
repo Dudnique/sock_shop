@@ -131,3 +131,15 @@ output-virtualbox-iso
 # Ignore grafanalib output
 /graphs/__pycache__/
 /graphs/*.json
+
+# Terraform
+# Never commit Terraform state: it maps config to real infrastructure and
+# may contain secrets (passwords, keys). Also causes merge conflicts.
+# Use a remote backend (S3+DynamoDB, Terraform Cloud, ...) in real projects.
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+*.tfplan
+*.plan
+
