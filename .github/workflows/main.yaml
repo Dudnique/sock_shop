@@ -42,7 +42,34 @@ jobs:
           /work/deploy/kubernetes/complete-demo.yaml
 
   # ---------------------------------------------------------------------------
-  # 3) Build and push the openapi / healthcheck helper images.
+  # 3) Helm chart sanity check (no cluster required).
+  #    - `helm lint --strict` catches malformed Chart.yaml, bad values, and
+  #      template syntax errors (it is run with --strict so warnings fail too).
+  #    - `helm template` renders every template, so we know a bad edit does not
+  #      break rendering before it ever reaches a cluster.
+  #    - The rendered output is piped through kubeconform to validate the API
+  #      schemas, exactly like the manifests-validate job does for the raw
+  #      manifests. This keeps the two deploy paths (plain YAML and Helm) equally
+  #      verified.
+  # ---------------------------------------------------------------------------
+  helm-chart-validate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: v3.16.1
+    - name: Lint Helm chart
+      run: helm lint deploy/kubernetes/helm-chart --strict
+    - name: Render chart and validate rendered manifests
+      run: |
+        helm template sock-shop deploy/kubernetes/helm-chart > rendered.yaml
+        docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:latest \
+          -strict -summary -ignore-missing-schemas /work/rendered.yaml
+
+  # ---------------------------------------------------------------------------
+  # 4) Build and push the openapi / healthcheck helper images.
   #    Only runs for version tags or the `master` branch, and requires the
   #    DOCKER_USER / DOCKER_PASS repository secrets to be configured.
   # ---------------------------------------------------------------------------
