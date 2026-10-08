@@ -70,11 +70,19 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 4) Build and push the openapi / healthcheck helper images.
-  #    Only runs for version tags or the `master` branch, and requires the
-  #    DOCKER_USER / DOCKER_PASS repository secrets to be configured.
+  #
+  #    Release-only job: it publishes real images to Docker Hub, so it must NOT
+  #    run on every push to the default branch. We deliberately gate it on
+  #    version tags (v*) only:
+  #      - pushing to a public registry on every commit would spam it with junk
+  #        tags and could publish broken images,
+  #      - it needs repository secrets (DOCKER_USER / DOCKER_PASS), which are
+  #        absent on forks, so it would fail there anyway,
+  #      - the usual convention is "verify on every commit, publish on release".
+  #    This job is kept for reference; without a v* tag it simply never runs.
   # ---------------------------------------------------------------------------
   build-test-images:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
       GROUP: weaveworksdemos
