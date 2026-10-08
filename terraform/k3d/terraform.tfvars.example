@@ -1,0 +1,12 @@
+# Copy this file to `terraform.tfvars` and adjust as needed.
+# Terraform loads `terraform.tfvars` automatically, so your local overrides are
+# kept out of version control (terraform.tfvars is git-ignored).
+#
+# Example: a smaller cluster and different host ports.
+#
+# cluster_name      = "sock-shop"
+# k3s_image         = "rancher/k3s:v1.35.5-k3s1"
+# servers           = 1
+# agents            = 1
+# ingress_http_port  = 8080
+# ingress_https_port = 8443
