@@ -69,7 +69,35 @@ jobs:
           -strict -summary -ignore-missing-schemas /work/rendered.yaml
 
   # ---------------------------------------------------------------------------
-  # 4) Build and push the openapi / healthcheck helper images.
+  # 4) Terraform static checks (no cloud and no Docker required).
+  #    - `terraform fmt -check` enforces canonical formatting; the job fails
+  #      (with a diff) if a .tf file is not formatted.
+  #    - `terraform init -backend=false` downloads the providers without locking
+  #      to a remote state backend.
+  #    - `terraform validate` then checks syntax, types and provider schema
+  #      WITHOUT talking to any real API, so it is safe and fast in CI.
+  #    Scoped with working-directory so the legacy AWS config under
+  #    deploy/kubernetes/terraform (kept only as a reference) is not checked.
+  # ---------------------------------------------------------------------------
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.16.5"
+    - name: Terraform fmt
+      working-directory: terraform/k3d
+      run: terraform fmt -check
+    - name: Terraform init + validate
+      working-directory: terraform/k3d
+      run: |
+        terraform init -backend=false -input=false
+        terraform validate
+
+  # ---------------------------------------------------------------------------
+  # 5) Build and push the openapi / healthcheck helper images.
   #
   #    Release-only job: it publishes real images to Docker Hub, so it must NOT
   #    run on every push to the default branch. We deliberately gate it on
