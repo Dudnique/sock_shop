@@ -7,36 +7,23 @@ metadata:
     app: grafana
     component: import-dashboards
 spec:
-  # Retry a few times in case Grafana is briefly unavailable.
-  backoffLimit: 10
   template:
     metadata:
       name: grafana-import-dashboards
       labels:
         app: grafana
         component: import-dashboards
+      annotations:
+        pod.beta.kubernetes.io/init-containers: '[
+          {
+            "name": "wait-for-endpoints",
+            "image": "giantswarm/tiny-tools",
+            "imagePullPolicy": "IfNotPresent",
+            "command": ["fish", "-c", "echo \"waiting for endpoints...\"; while true; set endpoints (curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt --header \"Authorization: Bearer \"(cat /var/run/secrets/kubernetes.io/serviceaccount/token) https://kubernetes.default.svc/api/v1/namespaces/monitoring/endpoints/grafana); echo $endpoints | jq \".\"; if test (echo $endpoints | jq -r \".subsets[].addresses | length\") -gt 0; exit 0; end; echo \"waiting...\";sleep 1; end"],
+            "args": ["monitoring", "grafana"]
+          }
+        ]'
     spec:
-      # Wait until Grafana actually serves HTTP before importing.
-      #
-      # NOTE: the original chart used the annotation
-      # `pod.beta.kubernetes.io/init-containers` (see legacy/ for the "before"
-      # version). Kubernetes stopped honouring that annotation once init
-      # containers became a real field (it was removed in 1.20), so the wait
-      # silently did nothing and the importer raced Grafana on a fresh install,
-      # failing with "Connection refused". It is now a proper initContainers
-      # entry, so dashboards/datasources are imported reliably.
-      initContainers:
-      - name: wait-for-grafana
-        image: giantswarm/tiny-tools
-        imagePullPolicy: IfNotPresent
-        command: ["/bin/sh", "-c"]
-        args:
-        - >
-          until curl -s -f http://grafana/api/health > /dev/null; do
-            echo "waiting for grafana to become ready...";
-            sleep 2;
-          done;
-          echo "grafana is ready";
       containers:
       - name: grafana-import-dashboards
         image: giantswarm/tiny-tools
