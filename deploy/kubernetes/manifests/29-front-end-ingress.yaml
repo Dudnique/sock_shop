@@ -6,6 +6,8 @@ metadata:
   labels:
     name: front-end
   namespace: sock-shop
+  annotations:
+    prometheus.io/probe: "true"
 spec:
   ingressClassName: traefik
   rules:

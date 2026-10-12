@@ -12,7 +12,8 @@ istio:
 
 ingress:
     className: traefik
-    annotations: {}
+    annotations:
+        prometheus.io/probe: "true"
     labels: {}
     host: ''
     tlsSecretName: ''

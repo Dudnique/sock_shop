@@ -9,10 +9,11 @@ metadata:
     name: front-end
   namespace: sock-shop
 spec:
-  type: NodePort
+  # ClusterIP: the app is exposed through the Ingress (Traefik) on :8080, so no
+  # NodePort is needed. (Was `type: NodePort` with `nodePort: 30001`, from the
+  # era before the ingress was added.)
   ports:
   - port: 80
     targetPort: 8079
-    nodePort: 30001
   selector:
     name: front-end

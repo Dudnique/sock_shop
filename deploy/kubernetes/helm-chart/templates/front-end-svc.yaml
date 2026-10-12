@@ -6,10 +6,9 @@ metadata:
   labels:
     name: front-end
 spec:
-  type: NodePort
+  # ClusterIP: the app is reached through the Ingress (Traefik); no NodePort needed.
   ports:
   - port: 80
     targetPort: 8079
-    nodePort: 30001
   selector:
     name: front-end
