@@ -1,103 +1,159 @@
-# Sock Shop — рабочий стенд на k3d
+# Sock Shop — a working stand on k3d
 
-Готовый к запуску форк демо-приложения **Sock Shop**
+> **English** | [Русский](README.ru.md)
+
+A ready-to-run fork of the **Sock Shop** demo application
 (upstream: [microservices-demo/microservices-demo](https://github.com/microservices-demo/microservices-demo)).
 
-В репозитории лежат **все файлы, необходимые для поднятия магазина** —
-Kubernetes-манифесты всех сервисов и баз данных, Ingress и скрипт развёртывания.
-Сами Docker-образы публичные и автоматически скачиваются из Docker Hub, поэтому
-в репозиторий их добавлять не нужно.
+The repository contains **everything needed to stand the shop up**: a declarative
+[Terraform](./terraform/k3d/) definition of the local [k3d](https://k3d.io) cluster,
+Kubernetes manifests for every service and database, an Ingress, the monitoring and
+alerting stacks, and a one-command deployment script. The Docker images are public
+and pulled automatically from Docker Hub, so they are not vendored into the repository.
 
-> Что именно было исправлено относительно upstream — см. [FIXES.md](./FIXES.md).
-> Кратко: у фронтенда был закреплён старый образ `front-end:0.3.1`, из-за
-> которого регистрация пользователя возвращала `500`. Теперь везде стоит
-> корректный `front-end:0.3.12`.
+> What was fixed compared to upstream — see [FIXES.md](./FIXES.md).
 
 ---
 
-## Что нужно
+## Requirements
 
-- Windows (или Linux/macOS) с установленными:
-  - [Docker](https://docs.docker.com/get-docker/)
-  - [k3d](https://k3d.io/) — лёгкий Kubernetes в Docker
+- Windows (or Linux/macOS) with:
+  - [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.5
+  - [Docker](https://docs.docker.com/get-docker/) (running)
   - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 
-Проверить:
+The [k3d](https://k3d.io/) CLI is convenient for inspecting the cluster, but it is
+not required: the Terraform provider talks to Docker directly.
+
+Verify:
 
 ```powershell
+terraform version
 docker version
-k3d version
 kubectl version --client
 ```
 
-## Быстрый старт (одна команда)
+## Quick start (one command)
 
 ```powershell
 .\deploy.ps1
 ```
 
-Скрипт создаст кластер k3d, применит все манифесты и дождётся запуска подов.
-После этого магазин откроется по адресу **http://localhost:8079**.
+The script is a thin orchestrator and does **four** things:
 
-Параметры (необязательно):
+1. provisions the k3d cluster with **Terraform** (`terraform/k3d`) - the single
+   source of truth for the infrastructure;
+2. applies the application manifests (`deploy/kubernetes/manifests`);
+3. applies the monitoring stack (`deploy/kubernetes/manifests-monitoring`);
+4. applies the alerting stack (`deploy/kubernetes/manifests-alerting`) plus its secrets.
+
+The shop then opens at **http://localhost:8080**.
+
+To tear the whole stand down again:
 
 ```powershell
-.\deploy.ps1 -ClusterName sock-shop -HttpPort 8079
+.\deploy.ps1 -Down
 ```
 
-## Ручное развёртывание
+### Secrets (never committed)
 
-Если не хочешь использовать скрипт:
+The alerting stack needs two credentials - a Telegram bot token and a Slack
+incoming-webhook URL. They are never committed to git; provide them either as
+environment variables or in a local, git-ignored file that `deploy.ps1` sources
+automatically:
 
 ```powershell
-# 1. Кластер с Traefik и пробросом хост-порта 8079 -> 80 (loadbalancer)
-k3d cluster create sock-shop -p 8079:80@loadbalancer
+# option A: environment variables
+$env:TELEGRAM_BOT_TOKEN = '...'
+$env:SLACK_WEBHOOK_URL  = 'https://hooks.slack.com/services/...'
 
-# 2. Применить манифесты (порядок задаётся числовыми префиксами имён файлов)
-kubectl apply -f deploy/kubernetes/manifests
+# option B: a git-ignored local file
+Copy-Item deploy\secrets.local.ps1.example deploy\secrets.local.ps1
+# then edit deploy\secrets.local.ps1 and fill in the real values
+```
 
-# 3. Дождаться готовности
+## Manual deployment (without the script)
+
+```powershell
+# 1. Cluster + kubeconfig (Terraform is the single source of truth for infra)
+cd terraform\k3d
+terraform init
+terraform apply
+$env:KUBECONFIG = (terraform output -raw kubeconfig_path)
+cd ..\..
+
+# 2. Application
+kubectl apply -f deploy\kubernetes\manifests
 kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
+
+# 3. Monitoring
+kubectl apply -f deploy\kubernetes\manifests-monitoring
+
+# 4. Alerting - the secret must exist first, then apply the manifests
+kubectl -n monitoring create secret generic alertmanager-secrets `
+    --from-literal=telegram_bot_token=$env:TELEGRAM_BOT_TOKEN `
+    --from-literal=slack_webhook_url=$env:SLACK_WEBHOOK_URL `
+    --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f deploy\kubernetes\manifests-alerting
 ```
 
-Либо всё сразу из одного файла:
+The application can also be applied from a single file:
+`kubectl apply -f deploy/kubernetes/complete-demo.yaml`.
+
+## Accessing the application and tools
+
+Everything is reachable from the host **without** `kubectl port-forward`: the host
+ports are published by `terraform/k3d`.
+
+| Port  | URL | What |
+|-------|-----|------|
+| 8080  | <http://localhost:8080>  | Sock Shop (through Traefik/Ingress) |
+| 9090  | <http://localhost:9090>  | Prometheus |
+| 3000  | <http://localhost:3000>  | Grafana |
+| 9093  | <http://localhost:9093>  | Alertmanager |
+| 16686 | <http://localhost:16686> | Jaeger UI (reserved; added in Phase 2) |
+
+The front-end Service is `ClusterIP`: the app is reachable **only** through the
+Ingress (Traefik) on port `8080`. It used to be a `NodePort` on `30001` before the
+ingress was added (see `FIXES.md`). For debugging you can still port-forward:
 
 ```powershell
-kubectl apply -f deploy/kubernetes/complete-demo.yaml
+kubectl port-forward -n sock-shop svc/front-end 8081:80
+# then http://localhost:8081
 ```
 
-## Доступ к приложению
-
-- Через Ingress (нужен Traefik, ставится в k3d по умолчанию): **http://localhost:8079**
-- Через NodePort (если пробрасывать порт вручную):
-
-  ```powershell
-  kubectl port-forward -n sock-shop svc/front-end 8070:80
-  # затем http://localhost:8070
-  ```
-
-## Структура
+## Layout
 
 ```
 .
-├── deploy.ps1                              # развёртывание в один клик
-├── FIXES.md                                # что исправлено и почему
-└── deploy/
-    ├── kubernetes/
-    │   ├── manifests/                      # пофайловые манифесты (00 ... 29)
-    │   ├── complete-demo.yaml              # всё в одном файле
-    │   └── helm-chart/                     # альтернатива: Helm-чарт
-    └── docker-compose/                     # альтернатива: docker-compose
+├── deploy.ps1                              # one-command deployment (Terraform + kubectl)
+├── FIXES.md                                # what was fixed and why (EN)
+├── FIXES.ru.md                             # what was fixed and why (RU)
+├── deploy/
+│   └── kubernetes/
+│       ├── manifests/                      # application, per-file (00 ... 29)
+│       ├── manifests-monitoring/           # Prometheus, Grafana, exporters
+│       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
+│       ├── complete-demo.yaml              # application in one file
+│       └── helm-chart/                     # alternative: Helm chart
+└── terraform/
+    └── k3d/                                # declarative definition of the cluster
 ```
 
-## Остановить / удалить
+## Stop / remove
 
 ```powershell
-k3d cluster stop sock-shop     # остановить
-k3d cluster start sock-shop    # запустить снова
-k3d cluster delete sock-shop   # удалить полностью
+.\deploy.ps1 -Down             # tear the whole stand down (terraform destroy)
 ```
 
-## Лицензия
+Or, to only pause the cluster:
 
-См. [LICENSE](./LICENSE). Проект распространяется под лицензией Apache 2.0.
+```powershell
+k3d cluster stop sock-shop     # stop
+k3d cluster start sock-shop    # start again
+k3d cluster delete sock-shop   # remove entirely
+```
+
+## License
+
+See [LICENSE](./LICENSE). Distributed under the Apache 2.0 license.
