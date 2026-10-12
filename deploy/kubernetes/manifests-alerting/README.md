@@ -1,6 +1,55 @@
-In order for the alerting component to work, a Kubernetes secret called "slack-hook-url" needs to be created. The content of the secret needs to be the Slack Hook API url.
+# Alerting
 
-For more information see
+Prometheus evaluates the alert rules; **Alertmanager** takes the firing alerts
+and decides *where* to send them. This directory holds Alertmanager, its routing
+config and its Service.
 
-1. https://kubernetes.io/docs/user-guide/secrets/
-2. https://api.slack.com/incoming-webhooks
+Pinned image: `prom/alertmanager:v0.34.1` (never `:latest` - reproducible stand).
+
+## Files
+
+| File | Purpose |
+| ---- | ------- |
+| `alertmanager-configmap.yaml` | Routing tree + receivers (Telegram, Slack). |
+| `alertmanager-dep.yaml` | Deployment; mounts the config and the secrets. |
+| `alertmanager-svc.yaml` | Service on port 9093. |
+| `examples/` | Samples that `kubectl apply -f <dir>` must NOT pick up. |
+
+## Two channels, and why `continue: true`
+
+Both Telegram and Slack receive every alert. Alertmanager walks the routing tree
+and, by default, follows **only the first matching child**, then stops - which
+would skip the root receiver entirely. To fan out to both, the config keeps the
+root receiver plus **two child routes without matchers**, the first carrying
+`continue: true` so evaluation proceeds to the next sibling:
+
+    route:
+      receiver: 'telegram'        # fallback: only if no child matches
+      routes:
+        - receiver: 'telegram'
+          continue: true          # keep going to the next sibling
+        - receiver: 'slack'
+
+## Secret (never in git)
+
+The config references a Kubernetes Secret named **`alertmanager-secrets`** in
+namespace `monitoring`. Its keys are mounted as files and read with `*_file`
+options, so no credential ever appears in this ConfigMap or in git:
+
+| Secret key | Consumed as |
+| ---------- | ----------- |
+| `telegram_bot_token` | `telegram_configs.bot_token_file` |
+| `slack_webhook_url`  | `slack_configs.api_url_file` |
+
+`deploy.ps1` creates it idempotently from the environment
+(`TELEGRAM_BOT_TOKEN`, `SLACK_WEBHOOK_URL`) or from `deploy\secrets.local.ps1`.
+
+## Alert rules
+
+Rules live next to Prometheus:
+`../manifests-monitoring/05-prometheus-alertrules.yaml`.
+
+## UI
+
+Reachable without `port-forward` at **http://localhost:9093** - the host port is
+published by `terraform/k3d` through the `exposed_node_ports` variable.

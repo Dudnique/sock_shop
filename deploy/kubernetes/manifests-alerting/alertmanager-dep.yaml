@@ -2,6 +2,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: alertmanager
+  namespace: monitoring
+  labels:
+    app: alertmanager
 spec:
   replicas: 1
   selector:
@@ -14,27 +17,47 @@ spec:
         app: alertmanager
     spec:
       containers:
-      - name: alertmanager
-        image: prom/alertmanager:latest
-        env:
-          - name: SLACK_HOOK_URL
-            valueFrom:
-              secretKeyRef:
-                name: slack-hook-url
-                key: slack-hook-url
-        command: ['/bin/sh', '/etc/alertmanager/configure_secret.sh']
-        args:
-          - '-config.file=/etc/alertmanager/config.yml'
-          - '-storage.path=/alertmanager'
-        ports:
         - name: alertmanager
-          containerPort: 9093
-        volumeMounts:
-        - name: config-volume
-          mountPath: /etc/alertmanager
+          # Pinned: never use :latest for a reproducible stand.
+          image: prom/alertmanager:v0.34.1
+          args:
+            - '--config.file=/etc/alertmanager/config.yml'
+            - '--storage.path=/alertmanager'
+            # Single replica: disable peer gossip to skip HA/cluster warnings.
+            - '--cluster.listen-address='
+          ports:
+            - name: alertmanager
+              containerPort: 9093
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9093
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9093
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/alertmanager
+            # Secrets are mounted as files and consumed via `*_file` options.
+            - name: secrets
+              mountPath: /etc/alertmanager/secrets
+              readOnly: true
+            - name: storage
+              mountPath: /alertmanager
       volumes:
-      - name: config-volume
-        configMap:
-          name: alertmanager
+        - name: config-volume
+          configMap:
+            name: alertmanager
+        - name: secrets
+          secret:
+            secretName: alertmanager-secrets
+        # Silences/notifications state is ephemeral for this stand.
+        - name: storage
+          emptyDir: {}
       nodeSelector:
         kubernetes.io/os: linux
