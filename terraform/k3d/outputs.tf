@@ -22,3 +22,11 @@ output "kubeconfig_path" {
   description = "Path to the kubeconfig written by this config."
   value       = pathexpand(var.kubeconfig_path)
 }
+
+output "tool_urls" {
+  description = "Host URLs of the tooling exposed via NodePorts (valid once the matching manifests are deployed)."
+  value = {
+    for host_port in sort(keys(var.exposed_node_ports)) :
+    host_port => "http://localhost:${host_port}"
+  }
+}

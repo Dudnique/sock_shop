@@ -10,3 +10,12 @@
 # agents            = 1
 # ingress_http_port  = 8080
 # ingress_https_port = 8443
+#
+# Host port -> NodePort mappings for the tooling. The app itself is served by
+# the load balancer (ingress_http_port); the tools are published on server:0.
+# exposed_node_ports = {
+#   "9090"  = 31090 # Prometheus
+#   "3000"  = 31300 # Grafana
+#   "9093"  = 30903 # Alertmanager
+#   "16686" = 30686 # Jaeger UI
+# }

@@ -39,6 +39,31 @@ variable "ingress_https_port" {
   default     = 8443
 }
 
+variable "exposed_node_ports" {
+  description = <<-EOT
+    Extra host-port : NodePort mappings published for the tooling
+    (Prometheus, Grafana, Alertmanager, Jaeger, ...).
+
+    Each KEY is a host port, each VALUE the Kubernetes NodePort it forwards to.
+    The mapping is attached to the first server node, so the tool becomes
+    reachable at http://localhost:<KEY> without kubectl port-forward.
+
+    NodePorts must be within the Kubernetes range 30000-32767.
+  EOT
+  type        = map(number)
+  default = {
+    "9090"  = 31090 # Prometheus (manifests-monitoring/07-prometheus-svc.yaml)
+    "3000"  = 31300 # Grafana    (manifests-monitoring/22-grafana-svc.yaml)
+    "9093"  = 30903 # Alertmanager (manifests-alerting/alertmanager-svc.yaml)
+    "16686" = 30686 # Jaeger UI  (manifests-jaeger/jaeger.yaml)
+  }
+
+  validation {
+    condition     = alltrue([for np in values(var.exposed_node_ports) : np >= 30000 && np <= 32767])
+    error_message = "Each NodePort must be within the Kubernetes range 30000-32767."
+  }
+}
+
 variable "kubeconfig_path" {
   description = "Where to write the generated kubeconfig. Kept OUTSIDE the repo because it contains cluster credentials."
   type        = string

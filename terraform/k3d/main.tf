@@ -22,18 +22,35 @@ resource "k3d_cluster" "sock_shop" {
     agents  = var.agents
     image   = var.k3s_image
 
-    # Publish the load balancer's 80/443 on the host, so the ingress (Traefik,
-    # which k3d ships by default) is reachable at http://localhost:<port>.
-    ports = [
-      {
-        port        = "${var.ingress_http_port}:80"
-        nodeFilters = ["loadbalancer"]
-      },
-      {
-        port        = "${var.ingress_https_port}:443"
-        nodeFilters = ["loadbalancer"]
-      },
-    ]
+    # Two kinds of published ports:
+    #
+    # 1) Ingress (Traefik, shipped by k3d) on the load balancer -> 80/443.
+    #    The app is reachable at http://localhost:<ingress_http_port>.
+    # 2) Tooling exposed directly via NodePorts, attached to the first server
+    #    node (NodePorts are served by nodes, NOT by the load balancer).
+    #    Each tool is reachable at http://localhost:<host_port>.
+    #
+    # There is exactly ONE load balancer (part of every k3d cluster) - it is
+    # NOT something we add per port. NodePorts simply don't exist on it, which
+    # is why the app goes through the load balancer and the tools via server:0.
+    ports = concat(
+      [
+        {
+          port        = "${var.ingress_http_port}:80"
+          nodeFilters = ["loadbalancer"]
+        },
+        {
+          port        = "${var.ingress_https_port}:443"
+          nodeFilters = ["loadbalancer"]
+        },
+      ],
+      [
+        for host_port, node_port in var.exposed_node_ports : {
+          port        = "${host_port}:${node_port}"
+          nodeFilters = ["server:0"]
+        }
+      ],
+    )
 
     options = {
       k3d = {

@@ -143,3 +143,12 @@ crash.log
 *.tfplan
 *.plan
 
+
+# Local stand secrets (never commit)
+deploy/secrets.local.ps1
+
+# Continue.dev agent rules (local tooling, not part of the deployable stand)
+.continue/
+
+# Editor / backup leftovers
+*.bak
