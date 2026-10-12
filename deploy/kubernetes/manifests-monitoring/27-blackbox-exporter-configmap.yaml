@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blackbox-exporter-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: exporter
+    app.kubernetes.io/name: blackbox-exporter
+data:
+  blackbox.yml: |
+    modules:
+      # проверка доступности URL снаружи: ждём один из 2xx кодов
+      http_2xx:
+        prober: http
+        timeout: 5s
+        http:
+          valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+          valid_status_codes: [200, 201, 204, 301, 302]
+          method: GET
+          preferred_ip_protocol: ip4
+      # проверка открытости TCP-порта
+      tcp_connect:
+        prober: tcp
+        timeout: 5s
+      # проверка ICMP (ping)
+      icmp:
+        prober: icmp
+        timeout: 5s

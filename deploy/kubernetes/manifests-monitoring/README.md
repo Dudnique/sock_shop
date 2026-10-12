@@ -1,4 +1,6 @@
-# Montoring
+# Monitoring
+
+> **English** | [Русский](README.ru.md)
 
 First create the monitoring namespace using the `00-monitoring-ns.yaml` file:
 
