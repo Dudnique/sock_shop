@@ -40,13 +40,15 @@ kubectl version --client
 .\deploy.ps1
 ```
 
-Скрипт — тонкий оркестратор, он делает **четыре** шага:
+Скрипт — тонкий оркестратор, он делает **шесть** шагов:
 
 1. поднимает кластер k3d через **Terraform** (`terraform/k3d`) — единственный
    источник правды про инфраструктуру;
 2. применяет манифесты приложения (`deploy/kubernetes/manifests`);
-3. применяет стек мониторинга (`deploy/kubernetes/manifests-monitoring`);
-4. применяет стек алертинга (`deploy/kubernetes/manifests-alerting`) и его секреты.
+3. применяет стек логирования (`deploy/kubernetes/manifests-logging` — Loki + Promtail);
+4. применяет стек трейсинга (`deploy/kubernetes/manifests-jaeger`);
+5. применяет стек мониторинга (`deploy/kubernetes/manifests-monitoring`);
+6. применяет стек алертинга (`deploy/kubernetes/manifests-alerting`) и его секреты.
 
 После этого магазин откроется по адресу **http://localhost:8080**.
 
@@ -87,10 +89,16 @@ cd ..\..
 kubectl apply -f deploy\kubernetes\manifests
 kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
 
-# 3. Мониторинг
+# 3. Логирование — Loki (хранилище) + Promtail (сборщик)
+kubectl apply -f deploy\kubernetes\manifests-logging
+
+# 4. Трейсинг — Jaeger
+kubectl apply -f deploy\kubernetes\manifests-jaeger
+
+# 5. Мониторинг
 kubectl apply -f deploy\kubernetes\manifests-monitoring
 
-# 4. Алертинг — сначала секрет, потом манифесты
+# 6. Алертинг — сначала секрет, потом манифесты
 kubectl -n monitoring create secret generic alertmanager-secrets `
     --from-literal=telegram_bot_token=$env:TELEGRAM_BOT_TOKEN `
     --from-literal=slack_webhook_url=$env:SLACK_WEBHOOK_URL `
@@ -112,7 +120,15 @@ kubectl apply -f deploy\kubernetes\manifests-alerting
 | 9090  | <http://localhost:9090>  | Prometheus |
 | 3000  | <http://localhost:3000>  | Grafana |
 | 9093  | <http://localhost:9093>  | Alertmanager |
-| 16686 | <http://localhost:16686> | Jaeger UI (зарезервирован; появится в Phase 2) |
+| 16686 | <http://localhost:16686> | Jaeger UI (трейсы) |
+
+Точка входа и для логов, и для трейсов — **Grafana** (логин `admin` / `admin`):
+в ней уже есть datasource `loki` (логи) и datasource `jaeger` (трейсы) — они
+описаны в `manifests-monitoring/20-grafana-configmap.yaml` и импортируются
+Job'ом `grafana-import-dashboards`. У Loki **нет** ни UI, ни порта на хосте —
+намеренно: это внутреннее хранилище, к которому обращается только Grafana
+(`http://loki.logging.svc.cluster.local:3100`). Логи смотрят в **Explore** с
+datasource `loki`, например запросом `{namespace="sock-shop"}`.
 
 Сервис front-end — `ClusterIP`: приложение доступно **только** через Ingress
 (Traefik) на порту `8080`. Раньше, до появления ingress, это был `NodePort` на
@@ -133,6 +149,8 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 ├── deploy/
 │   └── kubernetes/
 │       ├── manifests/                      # приложение, пофайлово (00 ... 29)
+│       ├── manifests-logging/              # Loki + Promtail (логи подов)
+│       ├── manifests-jaeger/               # Jaeger all-in-one (трейсы)
 │       ├── manifests-monitoring/           # Prometheus, Grafana, экспортёры
 │       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
 │       ├── complete-demo.yaml              # приложение одним файлом

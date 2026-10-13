@@ -31,6 +31,10 @@ spec:
         env:
         - name: mongo
           value: user-db:27017
+        # Trace spans are POSTed to the Jaeger all-in-one pod through its
+        # Zipkin-compatible endpoint; see deploy/kubernetes/manifests-jaeger.
+        - name: ZIPKIN
+          value: http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001

@@ -86,7 +86,7 @@ data:
               "show": false
             },
             "targets": [{
-              "expr": "(time() - process_start_time_seconds{name="prometheus"})",
+              "expr": "(time() - process_start_time_seconds{name=\"prometheus\"})",
               "intervalFactor": 2,
               "refId": "A",
               "step": 4
@@ -4166,6 +4166,29 @@ data:
       "name": "prometheus",
       "type": "prometheus",
       "url": "http://prometheus:9090",
+      "access": "proxy",
+      "basicAuth": false
+    }
+  # Loki = the log store (see deploy/kubernetes/manifests-logging). Grafana talks
+  # to it over the in-cluster Service `loki` and appends /loki/api/v1/... itself,
+  # so the url carries no path. NOTE: this address only exists INSIDE the cluster;
+  # there is no Loki UI and no host port - logs are read in Grafana.
+  loki-datasource.json: |
+    {
+      "name": "loki",
+      "type": "loki",
+      "url": "http://loki.logging.svc.cluster.local:3100",
+      "access": "proxy",
+      "basicAuth": false
+    }
+  # Jaeger = the trace store (see deploy/kubernetes/manifests-jaeger). The query
+  # Service listens on port 80 inside the cluster; the UI is also published on
+  # the host as http://localhost:16686 by terraform/k3d.
+  jaeger-datasource.json: |
+    {
+      "name": "jaeger",
+      "type": "jaeger",
+      "url": "http://jaeger-query.jaeger.svc.cluster.local",
       "access": "proxy",
       "basicAuth": false
     }

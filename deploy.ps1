@@ -4,8 +4,10 @@
 # Thin ORCHESTRATOR. It creates no infrastructure itself:
 #   1. Terraform provisions the k3d cluster  (single source of truth for infra).
 #   2. kubectl deploys the application        (manifests).
-#   3. kubectl deploys the monitoring stack   (manifests-monitoring).
-#   4. kubectl deploys the alerting stack     (manifests-alerting) + secrets.
+#   3. kubectl deploys the logging stack      (manifests-logging: Loki + Promtail).
+#   4. kubectl deploys the tracing stack      (manifests-jaeger).
+#   5. kubectl deploys the monitoring stack   (manifests-monitoring).
+#   6. kubectl deploys the alerting stack     (manifests-alerting) + secrets.
 #   It prints the resulting URLs.
 #
 # The cluster is deliberately NOT created with `k3d cluster create` here: that
@@ -66,7 +68,7 @@ try {
     }
 
     # --- 1. Cluster (Terraform) ---------------------------------------------
-    Write-Host "==> 1/4 Cluster via Terraform" -ForegroundColor Cyan
+    Write-Host "==> 1/6 Cluster via Terraform" -ForegroundColor Cyan
     terraform init -input=false
     terraform apply -auto-approve
 
@@ -87,16 +89,32 @@ Write-Host "    Waiting for nodes to be ready..." -ForegroundColor Cyan
 kubectl wait --for=condition=Ready node --all --timeout=180s | Out-Null
 
 # --- 2. Application ---------------------------------------------------------
-Write-Host "==> 2/4 Application (sock-shop)" -ForegroundColor Cyan
+Write-Host "==> 2/6 Application (sock-shop)" -ForegroundColor Cyan
 kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests")
 kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
 
-# --- 3. Monitoring ----------------------------------------------------------
-Write-Host "==> 3/4 Monitoring" -ForegroundColor Cyan
+# --- 3. Logging (Loki + Promtail) -------------------------------------------
+# Applied after the application on purpose: Promtail tails the log files of the
+# pods that are already running, so Loki starts collecting immediately.
+Write-Host "==> 3/6 Logging (Loki + Promtail)" -ForegroundColor Cyan
+kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-logging")
+
+# --- 4. Tracing (Jaeger) ----------------------------------------------------
+Write-Host "==> 4/6 Tracing (Jaeger)" -ForegroundColor Cyan
+kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-jaeger")
+
+# --- 5. Monitoring ----------------------------------------------------------
+Write-Host "==> 5/6 Monitoring" -ForegroundColor Cyan
+
+# The dashboard/datasource import is a one-shot Job and a Job spec is immutable,
+# so a plain re-apply of an existing Job fails. Delete the finished Job first:
+# the import then always runs against the current configmap.
+kubectl -n monitoring delete job grafana-import-dashboards --ignore-not-found | Out-Null
+
 kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-monitoring")
 
-# --- 4. Alerting ------------------------------------------------------------
-Write-Host "==> 4/4 Alerting" -ForegroundColor Cyan
+# --- 6. Alerting ------------------------------------------------------------
+Write-Host "==> 6/6 Alerting" -ForegroundColor Cyan
 
 # The secret is created BEFORE the manifests: the Alertmanager pod mounts it as
 # a volume, so it must exist or the pod will not start.

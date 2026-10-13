@@ -51,7 +51,8 @@ spec:
                   --request POST http://admin:admin@grafana/api/datasources \
                   --header "Content-Type: application/json" \
                   --header "Accept: application/json" \
-                  --data-binary "@$file" ;
+                  --data-binary "@$file" ||
+                  echo "(datasource already exists - kept as is)" ;
                 echo "" ;
               fi
             done ;

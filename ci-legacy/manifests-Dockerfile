@@ -1,0 +1,8 @@
+# ARCHIVED - this was deploy/kubernetes/Dockerfile; see ci-legacy/README.md.
+# It only existed to run the archived manifests-Makefile targets inside a container
+# (alpine + make), which is what the old CI job did. Nothing needs it anymore.
+FROM alpine:3.12.0 AS runtime
+
+RUN apk add bash make
+
+WORKDIR /workdir

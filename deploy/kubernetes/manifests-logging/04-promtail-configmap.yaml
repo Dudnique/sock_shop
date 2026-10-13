@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: logging
+data:
+  # Settings file of the log "pump". It is mounted into the pod at
+  # /etc/promtail/promtail.yaml (see 05-promtail-daemonset.yaml).
+  promtail.yaml: |
+    # Small web server inside Promtail: /metrics (Prometheus scrapes it because
+    # of the annotation on the pod) and /ready.
+    server:
+      http_listen_port: 3101
+      grpc_listen_port: 0
+
+    # "Bookmark": how far every log file has been read already. Without it a
+    # restart would re-send whole files and duplicate lines in Loki. It lives on
+    # the node (/run/promtail, see 05-promtail-daemonset.yaml), so it survives a
+    # pod restart.
+    positions:
+      filename: /run/promtail/positions.yaml
+
+    # Where the lines are sent: the `loki` Service of this namespace, HTTP push
+    # endpoint.
+    clients:
+    - url: http://loki.logging.svc.cluster.local:3100/loki/api/v1/push
+
+    scrape_configs:
+    # One single job. Promtail does NOT ask the Kubernetes API "which pods
+    # exist": it simply takes the log files of its own node by a wildcard. The
+    # folder name on the disk already carries everything we need to know, so the
+    # labels are cut out of the path with a regular expression. Fewer moving
+    # parts, no ServiceAccount permissions, nothing to break.
+    - job_name: pods
+      pipeline_stages:
+      # k3s uses containerd, and its log files look like
+      #   2024-01-01T00:00:00.000000000Z stdout F <the real text>
+      # This stage understands that shape: it takes the real timestamp and the
+      # stream (stdout/stderr) out of the line. Without it Grafana would show a
+      # bogus timestamp and every message would keep the ugly prefix.
+      - cri: {}
+      # Layout on the node:
+      #   /var/log/pods/<namespace>_<pod>_<uid>/<container>/<n>.log
+      # The uid is a UUID, which makes the split unambiguous even though the
+      # parts are separated by the same "_" as the parts themselves.
+      - regex:
+          source: filename
+          expression: '/var/log/pods/(?P<namespace>[^/_]+)_(?P<pod_name>[^/]+)_(?P<pod_uid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/(?P<container_name>[^/]+)/'
+      # Which of the extracted fields become labels of the log line, i.e. what
+      # you can filter by in Grafana. The uid is deliberately left out: it is
+      # unique per pod restart and would only produce noise (in Loki, every
+      # distinct label combination is a separate "stream" of data).
+      - labels:
+          namespace:
+          pod_name:
+          container_name:
+      static_configs:
+      - targets:
+        # Mandatory but unused field: for a local file there is no host to
+        # connect to, so any placeholder will do.
+        - localhost
+        labels:
+          job: pods
+          # Which files to read: every pod log file of this node. The node
+          # directory is mounted read-only, see 05-promtail-daemonset.yaml.
+          __path__: /var/log/pods/*/*/*.log

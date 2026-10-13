@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: logging
+  labels:
+    app: loki
+spec:
+  # ClusterIP only: Loki is queried by Grafana and written to by Promtail, both
+  # inside the cluster. Grafana's datasource points at exactly
+  # http://loki.logging.svc.cluster.local:3100 (see
+  # manifests-monitoring/20-grafana-configmap.yaml), so nothing on the host
+  # needs a NodePort and terraform/k3d needs no extra exposed port.
+  type: ClusterIP
+  selector:
+    app: loki
+  ports:
+  - name: http-metrics
+    port: 3100
+    targetPort: http-metrics
+  - name: grpc
+    port: 9096
+    targetPort: grpc

@@ -19,6 +19,11 @@ spec:
       containers:
       - name: payment
         image: weaveworksdemos/payment:0.4.3
+        env:
+        # Trace spans are POSTed to the Jaeger all-in-one pod through its
+        # Zipkin-compatible endpoint; see deploy/kubernetes/manifests-jaeger.
+        - name: ZIPKIN
+          value: http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans
         resources:
           limits:
             cpu: 200m

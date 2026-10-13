@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: DaemonSet
+# DaemonSet, not Deployment, because the log files live on the disk of each
+# node: a process on node A cannot see the files of node B. A DaemonSet keeps
+# exactly ONE pod on EVERY node, so we get three Promtail pods for our three
+# nodes. There is deliberately no `replicas` field - "one per node" is the whole
+# definition of a DaemonSet.
+#
+# There is no `strategy` field either: that one belongs to a Deployment. A
+# DaemonSet updates its pods node by node (default `updateStrategy:
+# RollingUpdate` with maxUnavailable: 1), which is exactly what we want.
+metadata:
+  name: promtail
+  namespace: logging
+  labels:
+    app: promtail
+spec:
+  selector:
+    matchLabels:
+      app: promtail
+  template:
+    metadata:
+      labels:
+        app: promtail
+      annotations:
+        # Prometheus keeps pods carrying this annotation, so Promtail's own
+        # /metrics are scraped without touching the Prometheus config.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3101"
+    spec:
+      # Deliberately no ServiceAccount of our own: Promtail only reads files of
+      # its own node and never talks to the Kubernetes API, so it needs no
+      # permissions at all (see 04-promtail-configmap.yaml).
+      #
+      # The control-plane node (k3d-sock-shop-server-0) carries a taint that
+      # repels ordinary pods. Without this toleration the DaemonSet would skip
+      # that node and its logs would be lost.
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: promtail
+        image: grafana/promtail:2.9.8
+        imagePullPolicy: IfNotPresent
+        args:
+        - -config.file=/etc/promtail/promtail.yaml
+        ports:
+        - name: http-metrics
+          containerPort: 3101
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/promtail
+        - name: positions
+          mountPath: /run/promtail
+        # Log files of the pods of THIS node. Read-only on purpose: a log
+        # collector has no business writing anything into /var/log.
+        - name: varlog
+          mountPath: /var/log
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: promtail-config
+      # hostPath = a real directory of the node, not a temporary one, so the
+      # "bookmark" file outlives the pod.
+      - name: positions
+        hostPath:
+          path: /run/promtail
+          type: DirectoryOrCreate
+      # The whole /var/log of the node, so that pod logs are visible inside the
+      # container. The same trick as with the database volumes: the data stays
+      # on the node and the pod only looks at it.
+      - name: varlog
+        hostPath:
+          path: /var/log
+      nodeSelector:
+        kubernetes.io/os: linux

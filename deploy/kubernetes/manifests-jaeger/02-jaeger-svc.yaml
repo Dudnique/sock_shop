@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-query
+  namespace: jaeger
+  labels:
+    app: jaeger
+spec:
+  # NodePort, NOT LoadBalancer.
+  #
+  # Terraform publishes host:16686 -> server:0:30686 (see
+  # terraform/k3d/variables.tf `exposed_node_ports`), and only a NodePort can
+  # own 30686. A `type: LoadBalancer` here would make k3s servicelb spawn a
+  # second `svclb-*` DaemonSet that binds hostPort 80 on every node - the same
+  # port `svclb-traefik` already holds, which would break the ingress path
+  # (http://localhost:8080). It would not expose 16686 either.
+  type: NodePort
+  selector:
+    app: jaeger
+  ports:
+  - name: query-http
+    port: 80
+    targetPort: query-http
+    nodePort: 30686
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-collector
+  namespace: jaeger
+  labels:
+    app: jaeger
+spec:
+  # ClusterIP: only in-cluster clients talk to the collector (services sending
+  # spans). Nothing outside the cluster needs it.
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+  - name: collector-http
+    port: 14268
+    targetPort: collector-http
+  - name: zipkin
+    port: 9411
+    targetPort: zipkin
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # This Service exists purely for its DNS name. The sock-shop services are
+  # configured with ZIPKIN=http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans,
+  # i.e. <service>.<namespace>.svc.cluster.local - so a Service called `zipkin`
+  # in namespace `jaeger` is what makes that hostname resolve. It points at the
+  # very same Jaeger pod, which speaks the Zipkin protocol on 9411.
+  name: zipkin
+  namespace: jaeger
+  labels:
+    app: jaeger
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+  - name: zipkin
+    port: 9411
+    targetPort: zipkin

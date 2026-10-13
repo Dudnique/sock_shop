@@ -7,7 +7,15 @@ See the [documentation](https://microservices-demo.github.io/deployment/kubernet
 ## Kubernetes manifests
 
 There are 2 sets of manifests for deploying Sock Shop on Kubernetes: one in the [manifests directory](manifests/), and complete-demo.yaml. The complete-demo.yaml is a single file manifest
-made by concatenating all the manifests from the manifests directory, so please regenerate it when changing files in the manifests directory.
+made by concatenating all the manifests from the manifests directory, so please regenerate it when changing files in the manifests directory:
+
+```sh
+awk '{print}' manifests/* > complete-demo.yaml
+```
+
+`awk` is exactly what the CI sync check uses as well. The old Docker + `make` wrapper for
+this used to live in this directory; it is archived under `ci-legacy/` (see
+`ci-legacy/README.md`).
 
 ## Monitoring
 

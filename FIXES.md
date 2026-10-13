@@ -93,6 +93,13 @@ Now CI runs:
 
 The original workflow is kept for history in `ci-legacy/main.yaml`.
 
+The Docker + `make` helper that used to generate and check `complete-demo.yaml` (the root
+`Makefile`, `deploy/kubernetes/Makefile` and `deploy/kubernetes/Dockerfile`) was archived
+in `ci-legacy/` for the same reason: the generation is a one-liner and CI performs the
+check itself, so `make` - and the purpose-built image it needed - were pure overhead. The
+regeneration command is documented in `ci-legacy/README.md` and in
+`deploy/kubernetes/README.md`.
+
 ---
 
 ## 5. Alerting stack added (Alertmanager: Telegram + Slack)
@@ -136,6 +143,12 @@ Recorded because they cost real time and are easy to hit again:
    `namespace: monitoring` was added explicitly to every monitoring/alerting manifest.
 7. **Alertmanager routing surprise.** When a child route matches, the root receiver is
    ignored - hence the two matcherless children with `continue: true` (see section 5).
+8. **`kubectl apply` never removes a field.** `serviceAccountName: promtail` was
+   deleted from the Promtail DaemonSet manifest, and the field **stayed** in the
+   cluster: `apply` is a three-way merge, so a key that is *absent* from the new
+   manifest keeps whatever the live object has. The object had to be deleted and
+   recreated from scratch (`kubectl delete -f ...` then `apply`) for the removal to
+   take effect - see section 8.
 
 ---
 
@@ -155,3 +168,139 @@ Traefik on `http://localhost:8080`.
 Changed in `deploy/kubernetes/manifests/10-front-end-svc.yaml`,
 `deploy/kubernetes/complete-demo.yaml` and
 `deploy/kubernetes/helm-chart/templates/front-end-svc.yaml`.
+
+---
+
+## 8. Logging stack added (Loki + Promtail)
+
+The stand had metrics and alerts but no logs: pod logs only existed on the node and
+disappeared with the container. This fork adds the fourth manifest directory,
+`deploy/kubernetes/manifests-logging/`, built from two pieces:
+
+- **Loki** - the store. One replica, filesystem storage, no host port and no UI: it is
+  an internal service that only Grafana queries.
+- **Promtail** - the collector. A DaemonSet (one pod per node), because log files live
+  on each node's disk and a pod on node A cannot see the files of node B.
+
+Reading the logs is done in **Explore** in Grafana with the `loki` datasource, e.g.
+the query `{namespace="sock-shop"}` - Loki deliberately has no UI of its own.
+
+### Symptom
+Loki was up and reachable from Grafana, but every query was empty.
+`GET /loki/api/v1/label/namespace/values` answered with a single empty string, i.e.
+"no data" - and, the confusing part, **nothing complained**: Promtail's own log was
+clean, no push errors, no RBAC warnings.
+
+### Real cause (neither Loki nor Grafana)
+Promtail was configured the "official" way, with `kubernetes_sd_configs`. That
+configuration asks the Kubernetes API which pods exist and derives log targets from
+the answers; the first version even carried a ServiceAccount plus a ClusterRole.
+Inside a single-container DaemonSet the discovery result was **empty** - silently:
+Promtail had nothing to tail, pushed nothing, and Loki stayed empty while looking
+perfectly healthy.
+
+### Fix
+Promtail no longer talks to the Kubernetes API at all - it just reads files:
+
+- **a static file glob instead of service discovery**: `__path__:
+  /var/log/pods/*/*/*.log` in a plain `static_configs` entry;
+- the node's `/var/log` is mounted read-only (hostPath), so the CRI log files
+  (`/var/log/pods/<ns>_<pod>_<uid>/<container>/<n>.log`) are visible inside the pod;
+- the labels Grafana filters on are cut **out of the path** by a `regex` stage on
+  `filename` (`namespace`, `pod_name`, `pod_uid`, `container_name`) and promoted by a
+  `labels` stage. `pod_uid` is deliberately **not** made a label: it changes on every
+  restart, and in Loki each new label combination is a new stream;
+- a `cri: {}` pipeline stage parses the containerd line format
+  (`<timestamp> stdout F <message>`), so the timestamp and the stdout/stderr stream are
+  real instead of being part of the message text;
+- `positions.yaml` lives on the node (`hostPath: /run/promtail`), so a Promtail restart
+  does not re-send whole files and duplicate lines in Loki;
+- **no RBAC at all**: ServiceAccount, ClusterRole and ClusterRoleBinding are gone. A
+  file-based collector needs no cluster-level permissions, and with them removed there
+  is nothing left that can silently return an empty result;
+- `tolerations: [{operator: Exists}]`, because the k3d server node carries a taint;
+  without the toleration that node's logs (kube-system, etc.) would never be collected;
+- `prometheus.io/scrape: "true"` + `prometheus.io/port: "3101"`, so Promtail's own
+  metrics are scraped without touching the Prometheus config;
+- the legacy Elasticsearch/Fluentd/Kibana manifests were moved to
+  `manifests-logging/legacy/`: kept for history, ignored by `kubectl apply -f <dir>`.
+
+### Verification
+```
+GET /loki/api/v1/label/namespace/values  -> ["kube-system","logging","monitoring","sock-shop", ...]
+GET /loki/api/v1/query_range?query={namespace="sock-shop"}
+```
+returns real application lines labelled `container_name`, `job`, `namespace`,
+`pod_name`, `stream` - and the same data is visible in Grafana Explore.
+
+### Trap worth remembering
+The first attempt merely patched the running DaemonSet, and the old
+`serviceAccountName: promtail` **survived**: `kubectl apply` is a three-way merge, so
+a field that is absent from the new manifest keeps its live value. The object had to be
+deleted and recreated (section 6, item 8).
+
+---
+
+## 9. Tracing stack added (Jaeger) - the "Phase 2" the README used to promise
+
+The port table already reserved `16686` for the Jaeger UI ("added in Phase 2") and
+Terraform already published `host:16686 -> node:30686`. This fork finishes that job:
+`deploy/kubernetes/manifests-jaeger/` deploys Jaeger and the instrumented services are
+pointed at it.
+
+- `00-jaeger-ns.yaml`, `01-jaeger-dep.yaml`, `02-jaeger-svc.yaml`;
+- image pinned to `jaegertracing/all-in-one:1.57.0`; `SPAN_STORAGE_TYPE=memory` - a demo
+  stand needs no PVC, traces are intentionally lost on restart;
+- `strategy: Recreate`, because a single in-memory instance must never run twice at once;
+- `COLLECTOR_ZIPKIN_HOST_PORT=:9411`: the sock-shop services speak **Zipkin**, not the
+  native Jaeger protocol, so Jaeger has to serve the Zipkin-compatible collector;
+- the `ZIPKIN` env var is set on the three services that are instrumented upstream
+  (`catalogue`, `payment`, `user`):
+  `http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans`
+  (`manifests/05-catalogue-dep.yaml`, `15-payment-dep.yaml`, `25-user-dep.yaml` and
+  `complete-demo.yaml`);
+- a Service literally named **`zipkin`** in namespace `jaeger` exists purely for that
+  DNS name - the hostname has to resolve before a service can POST spans;
+- `jaeger-query` is a **NodePort** (`30686`) so the host can open the UI, while
+  `jaeger-collector` stays `ClusterIP`: only in-cluster clients send spans.
+
+Why `NodePort` and not `type: LoadBalancer`: k3s `servicelb` would spawn another
+`svclb-*` DaemonSet that binds **hostPort 80 on every node** - the port `svclb-traefik`
+already owns - which would break `http://localhost:8080`; and it would still not publish
+`16686`.
+
+Verification: after the shop has served some traffic, `http://localhost:16686` and
+`GET /api/services` list `["jaeger-all-in-one","payment","catalogue","user"]`. Grafana
+also gets a `jaeger` datasource, so traces can be searched from Grafana as well.
+
+---
+
+## 10. Grafana: Loki/Jaeger datasources, and a dashboard JSON that failed silently
+
+- `manifests-monitoring/20-grafana-configmap.yaml` gained two more files for the import
+  Job: `loki-datasource.json` (`"type": "loki"`,
+  `"url": "http://loki.logging.svc.cluster.local:3100"`, `"access": "proxy"`) and
+  `jaeger-datasource.json` (`"type": "jaeger"`,
+  `"url": "http://jaeger-query.jaeger.svc.cluster.local"`). The Job's script already
+  loops over `*-datasource.json` and `*-dashboard.json`, so the Job itself needed no
+  structural change. `access: proxy` matters: Grafana reaches both stores from inside
+  the cluster, so the browser never has to resolve a `*.svc.cluster.local` name.
+- the datasource loop is now **idempotent**: it ends with
+  `|| echo "(datasource already exists - kept as is)"`. On a second deployment the API
+  answers `409 Conflict` ("data source with the same name already exists") once per
+  datasource - that is expected state, not a failure, and the log now says so instead of
+  printing a bare curl error.
+- **a pre-existing bug was found and fixed**: `prometheus-stats-dashboard.json`
+  contained `process_start_time_seconds{name="prometheus"}` with **unescaped** double
+  quotes inside a JSON string embedded in a ConfigMap, so that file was not valid JSON
+  and Grafana rejected it with `400`. The import loop swallowed it - every iteration
+  ends with `echo ""`, so the container always exited `0` and the Job reported
+  `Complete`. After escaping the quotes all **6** dashboards and **3** datasources
+  import, and every dashboard payload carries `"overwrite": true`, so a re-import
+  updates a dashboard instead of duplicating it.
+- because a Job spec is immutable, `deploy.ps1` now deletes the finished
+  `grafana-import-dashboards` Job **before** applying `manifests-monitoring`, so a
+  redeploy re-imports the current configmap instead of failing on an immutable field.
+- `deploy.ps1` grew from four steps to **six** (cluster, application, logging, tracing,
+  monitoring, alerting) and the README gained the matching manual commands, so a
+  from-scratch `.\deploy.ps1` reproduces the whole stand - logs and traces included.

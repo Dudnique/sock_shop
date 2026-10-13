@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: logging
+  labels:
+    app: loki
+spec:
+  replicas: 1
+  # "Recreate": kill the old pod first and only then start the new one. (The
+  # default strategy, "RollingUpdate", starts the new pod while the old one is
+  # still running.) Loki keeps its data in the /loki volume, and two pods writing
+  # to the same table of contents would corrupt it - so only one pod may exist at
+  # any moment.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+      annotations:
+        # Prometheus keeps pods carrying this annotation (the `kubernetes-pods`
+        # job in manifests-monitoring/04-prometheus-configmap.yaml), so Loki
+        # exposes its own /metrics to Prometheus with no extra config.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3100"
+    spec:
+      containers:
+      - name: loki
+        image: grafana/loki:2.9.8
+        imagePullPolicy: IfNotPresent
+        args:
+        - -config.file=/etc/loki/loki.yaml
+        ports:
+        - name: http-metrics
+          containerPort: 3100
+        - name: grpc
+          containerPort: 9096
+        # /ready answers 200 only once Loki has loaded its config and the
+        # ingester ring, so it is the honest readiness signal. Loki is the
+        # busiest part of the stand (it receives lines from all three nodes), so
+        # the probes are patient: a short busy moment must NOT throw Loki out of
+        # the Service, or Promtail would have nowhere to send logs.
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http-metrics
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 6
+        # Tolerant liveness: Loki can be briefly busy while compacting, and a
+        # restart would lose the in-memory ring for no good reason.
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: http-metrics
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 6
+        # Loki pushes data to disk and compacts it, so it is the hungriest pod of
+        # the stand. The nodes have plenty of idle CPU, so we do not strangle it
+        # with a 500m limit: throttling is what makes its answers time out.
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 1Gi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/loki
+        - name: storage
+          mountPath: /loki
+      volumes:
+      - name: config
+        configMap:
+          name: loki-config
+      # emptyDir on purpose: the stand has no PersistentVolumes and is meant to
+      # be disposable, so log data lives exactly as long as the pod does.
+      - name: storage
+        emptyDir: {}
+      nodeSelector:
+        kubernetes.io/os: linux

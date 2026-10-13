@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: jaeger
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  # The all-in-one image keeps spans in memory, so a rolling update would
+  # briefly run two writers against the same storage. Recreate is the honest
+  # strategy for this single-instance demo stack.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+      - name: jaeger
+        image: jaegertracing/all-in-one:1.57.0
+        imagePullPolicy: IfNotPresent
+        env:
+        # Serve the Zipkin-compatible collector on 9411: the sock-shop services
+        # (catalogue, payment, user) POST their spans to
+        # http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans.
+        - name: COLLECTOR_ZIPKIN_HOST_PORT
+          value: ":9411"
+        # In-memory storage: enough for a local demo stand, no PVC required.
+        # Restarting the pod drops the traces on purpose.
+        - name: SPAN_STORAGE_TYPE
+          value: memory
+        ports:
+        - name: query-http
+          containerPort: 16686
+          protocol: TCP
+        - name: zipkin
+          containerPort: 9411
+          protocol: TCP
+        - name: collector-http
+          containerPort: 14268
+          protocol: TCP
+        - name: otlp-grpc
+          containerPort: 4317
+          protocol: TCP
+        - name: otlp-http
+          containerPort: 4318
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 300m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: query-http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: query-http
+          initialDelaySeconds: 15
+          periodSeconds: 15
+          timeoutSeconds: 5
+      nodeSelector:
+        kubernetes.io/os: linux

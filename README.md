@@ -39,13 +39,15 @@ kubectl version --client
 .\deploy.ps1
 ```
 
-The script is a thin orchestrator and does **four** things:
+The script is a thin orchestrator and does **six** things:
 
 1. provisions the k3d cluster with **Terraform** (`terraform/k3d`) - the single
    source of truth for the infrastructure;
 2. applies the application manifests (`deploy/kubernetes/manifests`);
-3. applies the monitoring stack (`deploy/kubernetes/manifests-monitoring`);
-4. applies the alerting stack (`deploy/kubernetes/manifests-alerting`) plus its secrets.
+3. applies the logging stack (`deploy/kubernetes/manifests-logging` - Loki + Promtail);
+4. applies the tracing stack (`deploy/kubernetes/manifests-jaeger`);
+5. applies the monitoring stack (`deploy/kubernetes/manifests-monitoring`);
+6. applies the alerting stack (`deploy/kubernetes/manifests-alerting`) plus its secrets.
 
 The shop then opens at **http://localhost:8080**.
 
@@ -86,10 +88,16 @@ cd ..\..
 kubectl apply -f deploy\kubernetes\manifests
 kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
 
-# 3. Monitoring
+# 3. Logging - Loki (store) + Promtail (collector)
+kubectl apply -f deploy\kubernetes\manifests-logging
+
+# 4. Tracing - Jaeger
+kubectl apply -f deploy\kubernetes\manifests-jaeger
+
+# 5. Monitoring
 kubectl apply -f deploy\kubernetes\manifests-monitoring
 
-# 4. Alerting - the secret must exist first, then apply the manifests
+# 6. Alerting - the secret must exist first, then apply the manifests
 kubectl -n monitoring create secret generic alertmanager-secrets `
     --from-literal=telegram_bot_token=$env:TELEGRAM_BOT_TOKEN `
     --from-literal=slack_webhook_url=$env:SLACK_WEBHOOK_URL `
@@ -111,7 +119,15 @@ ports are published by `terraform/k3d`.
 | 9090  | <http://localhost:9090>  | Prometheus |
 | 3000  | <http://localhost:3000>  | Grafana |
 | 9093  | <http://localhost:9093>  | Alertmanager |
-| 16686 | <http://localhost:16686> | Jaeger UI (reserved; added in Phase 2) |
+| 16686 | <http://localhost:16686> | Jaeger UI (traces) |
+
+Grafana (login `admin` / `admin`) is the single entry point for both the logs and
+the traces: it comes with a `loki` datasource (logs) and a `jaeger` datasource
+(traces), both defined in `manifests-monitoring/20-grafana-configmap.yaml` and
+imported by the `grafana-import-dashboards` Job. Loki has **no** UI and **no**
+host port on purpose - it is an internal store queried only by Grafana
+(`http://loki.logging.svc.cluster.local:3100`): read the logs in **Explore** with
+the `loki` datasource, e.g. the query `{namespace="sock-shop"}`.
 
 The front-end Service is `ClusterIP`: the app is reachable **only** through the
 Ingress (Traefik) on port `8080`. It used to be a `NodePort` on `30001` before the
@@ -132,6 +148,8 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 ├── deploy/
 │   └── kubernetes/
 │       ├── manifests/                      # application, per-file (00 ... 29)
+│       ├── manifests-logging/              # Loki + Promtail (pod logs)
+│       ├── manifests-jaeger/               # Jaeger all-in-one (traces)
 │       ├── manifests-monitoring/           # Prometheus, Grafana, exporters
 │       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
 │       ├── complete-demo.yaml              # application in one file

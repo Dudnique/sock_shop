@@ -1,3 +1,10 @@
+# ARCHIVED - this was deploy/kubernetes/Makefile; see ci-legacy/README.md.
+# Kept with its Dockerfile (manifests-Dockerfile) for reference only: the two
+# commands it wraps are a one-liner each and are run directly now:
+#   awk '{print}' deploy/kubernetes/manifests/* > deploy/kubernetes/complete-demo.yaml
+#   awk '{print}' deploy/kubernetes/manifests/* | diff deploy/kubernetes/complete-demo.yaml -
+# (the second one is exactly what CI runs, see .github/workflows/main.yaml).
+
 PWD = $(shell pwd)
 MANIFESTS = $(or $(shell printenv MANIFESTS), manifests)
 
