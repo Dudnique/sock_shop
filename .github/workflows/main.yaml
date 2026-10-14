@@ -1,5 +1,11 @@
 name: ci
 
+# Action runtime requirement: every `uses:` below must declare `runs.using: node24`.
+# Node 20 was removed from GitHub-hosted runners on 2026-09-23, so node20 majors
+# (actions/checkout@v4, azure/setup-helm@v4, hashicorp/setup-terraform@v3,
+# docker/*@v3, docker/build-push-action@v5) are force-run on Node 24 and emit
+# "Node.js 20 is deprecated" annotations. Keep the lowest node24 major pinned here
+# (docker/build-push-action switched only in v7 - v6 is still node20).
 on:
   push:
     branches:
@@ -17,7 +23,7 @@ jobs:
   complete-demo-sync-check:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Check complete-demo.yaml is in sync with manifests/
       run: |
         awk '{print}' deploy/kubernetes/manifests/* | diff deploy/kubernetes/complete-demo.yaml -
@@ -33,7 +39,7 @@ jobs:
   manifests-validate:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Validate manifests (kubeconform -strict)
       run: |
         docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:latest \
@@ -55,9 +61,9 @@ jobs:
   helm-chart-validate:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Set up Helm
-      uses: azure/setup-helm@v4
+      uses: azure/setup-helm@v5
       with:
         version: v3.16.1
     - name: Lint Helm chart
@@ -82,9 +88,9 @@ jobs:
   terraform-validate:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v3
+      uses: hashicorp/setup-terraform@v4
       with:
         terraform_version: "1.16.5"
     - name: Terraform fmt
@@ -118,16 +124,16 @@ jobs:
       matrix:
         repo: ["openapi", "healthcheck"]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
     - name: Login to DockerHub
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         username: ${{ secrets.DOCKER_USER }}
         password: ${{ secrets.DOCKER_PASS }}
     - name: Build and push
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@v7
       with:
         context: ${{ matrix.repo }}
         push: true
