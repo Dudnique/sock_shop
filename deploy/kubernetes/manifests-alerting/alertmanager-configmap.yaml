@@ -39,10 +39,11 @@ data:
             parse_mode: 'HTML'
             send_resolved: true
             message: |-
-              {{ if eq .Status "firing" }}[FIRING]{{ else }}[RESOLVED]{{ end }} {{ .CommonLabels.alertname }} ({{ .Alerts | len }})
+              {{ if eq .Status "firing" }}[FIRING]{{ else }}[RESOLVED]{{ end }} {{ .CommonLabels.alertname }}{{ if .CommonLabels.severity }} [{{ .CommonLabels.severity }}]{{ end }} ({{ .Alerts | len }})
               {{ range .Alerts }}
-              {{ .Annotations.summary }}
+              {{ .Annotations.summary }}{{ if .Labels.namespace }} [ns: {{ .Labels.namespace }}]{{ end }}{{ if .Labels.deployment }} [deploy: {{ .Labels.deployment }}]{{ end }}{{ if .Labels.pod }} [pod: {{ .Labels.pod }}]{{ end }}
               {{ .Annotations.description }}
+              {{ if .Annotations.runbook }}runbook: {{ .Annotations.runbook }}{{ end }}
               {{ end }}
 
       # --- Slack -------------------------------------------------------------

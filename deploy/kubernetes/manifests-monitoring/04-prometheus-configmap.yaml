@@ -151,12 +151,47 @@ data:
         replacement: blackbox-exporter.monitoring.svc.cluster.local:9115
       - source_labels: [__param_target]
         target_label: instance
+      - target_label: probe_scope
+        replacement: ingress
       - action: labelmap
         regex: __meta_kubernetes_ingress_label_(.+)
       - source_labels: [__meta_kubernetes_namespace]
         target_label: kubernetes_namespace
       - source_labels: [__meta_kubernetes_ingress_name]
         target_label: kubernetes_name
+    - job_name: 'blackbox-external'
+      # Probes the store through the SAME path a browser on the host uses:
+      # host port 8080 -> k3d loadbalancer -> Traefik -> front-end.
+      #
+      # Why this job exists: the kubernetes-ingresses job above probes Traefik
+      # *from inside* the cluster. That catches a dead app and a broken Ingress,
+      # but it can never catch a broken published port (k3d port mapping / LB
+      # container down) - exactly the layer a user hits first. Verified from a
+      # pod in this cluster: host.docker.internal resolves (Docker Desktop host,
+      # 192.168.65.254) and http://host.docker.internal:8080/ answers 200 with
+      # the 8688-byte store HTML.
+      #
+      # NOTE: host.docker.internal is a Docker Desktop convenience name. On a
+      # plain Linux host it has to be replaced by the host gateway address
+      # (add extra_hosts / hostAliases to the blackbox pod) - the probe target
+      # is the only thing that changes.
+      metrics_path: /probe
+      params:
+        module: [http_2xx]
+      static_configs:
+      - targets:
+        - http://host.docker.internal:8080/
+      relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter.monitoring.svc.cluster.local:9115
+      # probe_scope tells apart the two blackbox jobs in alerts and dashboards:
+      # "external" = how the user sees it, "ingress" = cluster-internal path.
+      - target_label: probe_scope
+        replacement: external
     - job_name: 'kube-state-metrics'
       static_configs:
         - targets: ['kube-state-metrics.monitoring.svc.cluster.local:8080']

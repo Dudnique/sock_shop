@@ -38,6 +38,15 @@ spec:
           readOnlyRootFilesystem: true
       - name: rabbitmq-exporter
         image: kbudde/rabbitmq-exporter
+        # The image listens on 9419 by default (PUBLISH_PORT=9419), while this
+        # file, 20-rabbitmq-svc.yaml and the prometheus.io/port annotation all
+        # announce 9090. That mismatch made every scrape of the rabbitmq Service
+        # fail with "connection refused" - a permanently DOWN target, invisible
+        # until a ScrapeTargetDown rule was added. Pin the exporter to the port
+        # the rest of the manifests promise.
+        env:
+        - name: PUBLISH_PORT
+          value: "9090"
         ports:
         - containerPort: 9090
           name: exporter

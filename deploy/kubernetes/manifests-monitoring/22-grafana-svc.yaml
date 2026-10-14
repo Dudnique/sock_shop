@@ -7,12 +7,17 @@ metadata:
     app: grafana
     component: core
 spec:
-  type: NodePort
+  # The Service is ClusterIP on purpose. As a NodePort (31300) it was published
+  # to the host by terraform/k3d, so Grafana was reachable on EVERY interface of
+  # the machine. It is now reachable only through Traefik - see
+  # 30-grafana-ingress.yaml (http://grafana.localhost:8080) - or through
+  # `kubectl port-forward -n monitoring svc/grafana 3000:80`.
+  type: ClusterIP
   ports:
-  - protocol: TCP
+  - name: http
+    protocol: TCP
     port: 80
     targetPort: 3000
-    nodePort: 31300
   selector:
     app: grafana
     component: core

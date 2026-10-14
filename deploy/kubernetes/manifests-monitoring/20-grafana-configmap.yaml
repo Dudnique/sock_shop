@@ -4192,6 +4192,107 @@ data:
       "access": "proxy",
       "basicAuth": false
     }
+  # Loki has no dashboards of its own (it is a pure log store, there is not even
+  # a UI): a "Loki dashboard" is a Grafana dashboard that queries the `loki`
+  # datasource above. This one exists so the logs are visible at a glance
+  # instead of only in Explore. The labels used here are the ones promtail
+  # extracts from the log file path: namespace / pod_name / container_name
+  # (see manifests-logging/04-promtail-configmap.yaml).
+  loki-logs-dashboard.json: |
+    {
+      "overwrite": true,
+      "dashboard": {
+        "id": null,
+        "uid": "sock-shop-logs",
+        "title": "Sock Shop Logs (Loki)",
+        "tags": ["sock-shop", "logs"],
+        "timezone": "browser",
+        "schemaVersion": 27,
+        "version": 1,
+        "editable": true,
+        "graphTooltip": 0,
+        "refresh": "30s",
+        "time": { "from": "now-1h", "to": "now" },
+        "templating": {
+          "list": [
+            {
+              "name": "namespace",
+              "label": "namespace",
+              "type": "query",
+              "datasource": "loki",
+              "query": "label_values(namespace)",
+              "includeAll": false,
+              "multi": true,
+              "current": { "text": "sock-shop", "value": "sock-shop", "selected": true }
+            }
+          ]
+        },
+        "panels": [
+          {
+            "id": 1,
+            "type": "graph",
+            "title": "Log volume by pod (lines/s)",
+            "datasource": "loki",
+            "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+            "targets": [
+              {
+                "expr": "sum by (pod_name) (rate({namespace=~\"$namespace\"}[1m]))",
+                "legendFormat": "{{pod_name}}",
+                "refId": "A"
+              }
+            ],
+            "legend": { "show": true, "sort": 2, "values": false },
+            "yaxes": [ { "format": "short" }, { "format": "short" } ]
+          },
+          {
+            "id": 2,
+            "type": "graph",
+            "title": "Errors per second (error|exception|fatal|panic)",
+            "datasource": "loki",
+            "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+            "targets": [
+              {
+                "expr": "sum(rate({namespace=~\"$namespace\"} |~ \"(?i)error|exception|fatal|panic\" [5m]))",
+                "legendFormat": "errors/s",
+                "refId": "A"
+              }
+            ],
+            "legend": { "show": false },
+            "yaxes": [ { "format": "short" }, { "format": "short" } ]
+          },
+          {
+            "id": 3,
+            "type": "graph",
+            "title": "Top 5 pods by errors (last 5m)",
+            "datasource": "loki",
+            "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+            "targets": [
+              {
+                "expr": "topk(5, sum by (pod_name) (count_over_time({namespace=~\"$namespace\"} |~ \"(?i)error|exception|fatal|panic\" [5m])))",
+                "legendFormat": "{{pod_name}}",
+                "refId": "A"
+              }
+            ],
+            "legend": { "show": true, "sort": 2, "values": false },
+            "yaxes": [ { "format": "short" }, { "format": "short" } ]
+          },
+          {
+            "id": 4,
+            "type": "logs",
+            "title": "Errors (live tail)",
+            "datasource": "loki",
+            "gridPos": { "h": 16, "w": 12, "x": 12, "y": 8 },
+            "targets": [
+              {
+                "expr": "{namespace=~\"$namespace\"} |~ \"(?i)error|exception|fatal|panic\"",
+                "refId": "A"
+              }
+            ],
+            "options": { "showTime": true, "showLabels": true, "wrapLogMessage": true }
+          }
+        ]
+      }
+    }
   prometheus-node-exporter-dashboard.json: |
     {
       "overwrite": true,

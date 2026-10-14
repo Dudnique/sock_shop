@@ -304,3 +304,169 @@ also gets a `jaeger` datasource, so traces can be searched from Grafana as well.
 - `deploy.ps1` grew from four steps to **six** (cluster, application, logging, tracing,
   monitoring, alerting) and the README gained the matching manual commands, so a
   from-scratch `.\deploy.ps1` reproduces the whole stand - logs and traces included.
+
+---
+
+## 11. Monitoring: 11 alert rules, the promtool gate, and the three dead targets they exposed
+
+In `HEAD`, `manifests-monitoring/05-prometheus-alertrules.yaml` held **one** group with
+**one** rule (`HighErrorRate`). It now holds **11 rules in 4 groups** - and that is not
+"rules for the sake of rules", it is closing concrete blind spots of this stand.
+
+| Group | Rules | What it catches |
+|---|---|---|
+| `availability` | `ProbeFailed`, `ProbeSlow` | storefront down / answering slower than 2s |
+| `application` | `HighErrorRate`, `DeploymentReplicasUnavailable`, `PodCrashLooping`, `PodRestartFlapping` | 5xx, zero available replicas, CrashLoopBackOff, restart flapping |
+| `infrastructure` | `NodeNotReady`, `NodeDiskPressure`, `NodeHighCPU`, `NodeHighMemory` | node gone, disk/CPU/RAM pressure |
+| `meta` | `ScrapeTargetDown` | **monitoring itself**: a scrape target stopped answering |
+
+- **Why a broken rule file is so dangerous.** Prometheus treats a malformed rule file as
+  **non-fatal**: it logs an error and keeps running **without those alerts**. That is the
+  worst possible outcome - silence looks exactly like "everything is fine". CI therefore
+  gained a `promtool check rules` step: the rule file is extracted from the ConfigMap
+  (`yq`) and validated. `kubeconform` can never catch this: a rule file has no
+  `apiVersion/kind`, it is not a Kubernetes object at all.
+- **Rules are not re-read on their own.** kubelet updates the file inside the mounted
+  ConfigMap volume, but Prometheus reads it at startup only. Proven live: the file in the
+  pod already contained all 11 rules while `GET /api/v1/rules` still showed the single old
+  one. The fix is not a restart (that would wipe the TSDB on `emptyDir` and lose metric
+  history) but `POST /-/reload`. After applying the monitoring manifests, `deploy.ps1`
+  waits for the file to land, triggers the reload and prints the loaded rules.
+- **The `ScrapeTargetDown` rule immediately found three dead targets** that had been
+  silently broken in the config:
+
+  | Target | Error | Root cause | Fix |
+  |---|---|---|---|
+  | `rabbitmq:9090` | `connection refused` | the `kbudde/rabbitmq-exporter` sidecar listens on **9419** (`PUBLISH_PORT`) while the Service and its annotation promised 9090 | pinned `PUBLISH_PORT: "9090"` |
+  | `queue-master:80` | `expected a valid start token, got "{"` | this service serves Spring Boot **Actuator JSON** on `/metrics` and has no Prometheus endpoint at all (`/actuator/prometheus` -> 404) | dropped `prometheus.io/scrape` (otherwise a permanently DOWN target) |
+  | `alertmanager:9093/alertmanager/metrics` | `HTTP 404` | wrong `prometheus.io/path`; Alertmanager serves its own metrics on `/metrics` | path corrected |
+
+- **The storefront probe now covers two paths instead of one.** Blackbox used to probe
+  `http://traefik.kube-system.svc.cluster.local/` - a path that never leaves the cluster.
+  It catches a dead application (the Ingress has no `host`, so everything routes to
+  `front-end`; verified: `200`, `X-Powered-By: Express`, 8688 bytes of HTML) but it can
+  never catch a broken **published port** (k3d port mapping / a dead loadbalancer
+  container) - the very first layer a user hits. A `blackbox-external` job was added with
+  the target `http://host.docker.internal:8080/`, which from inside a pod is exactly the
+  path a browser on the host takes (verified: `200 OK`). Both probes carry `probe_scope`
+  (`ingress` / `external`), so an alert tells you which layer broke. Note:
+  `host.docker.internal` is a Docker Desktop convenience - on a plain Linux host it has to
+  be replaced with the host gateway address.
+- Verified that **all 11 rules rely on metrics that actually exist** instead of invented
+  ones: `request_duration_seconds_count` (10 series, real `status_code` label),
+  `kube_deployment_status_replicas_available` (14 `sock-shop` deployments), `probe_success`,
+  node-exporter metrics. A rule whose metric does not exist is the same silent gap from the
+  other side: it sits in the list and can never fire.
+- Bottom line in numbers: `promtool check rules` -> `SUCCESS: 11 rules found`; live
+  Prometheus holds 4 groups / 11 rules; targets in `down` state: **0**; probe paths: **2**.
+
+---
+
+## 12. Grafana access: no host port, no `admin/admin` - a Secret, an Ingress and a Job that lied
+
+Three problems around Grafana were really one problem: convenience quietly replacing a
+security control. All three are now closed, and each fix was verified on the live stand.
+
+- **A `NodePort` published on every host interface.** `22-grafana-svc.yaml` was
+  `type: NodePort` with `nodePort: 31300`, and Terraform mapped it to host port 3000, so
+  Grafana listened on **every** interface of the machine (office Wi-Fi included) with the
+  default `admin`/`admin`. It is now a plain `ClusterIP` served by the same Traefik
+  entrypoint as the application and distinguished by the HTTP `Host` header
+  (`30-grafana-ingress.yaml`) - one port, several backends, the same idea as
+  `server_name` in nginx. Reach it as `http://grafana.localhost:8080` (one line in the
+  hosts file) or, without admin rights, `kubectl port-forward -n monitoring svc/grafana
+  3000:80`. The matching host-port entry was removed from `terraform/k3d/variables.tf`.
+  With the Service already `ClusterIP`, the leftover mapping answered nothing
+  (`curl: (52) Empty reply from server` - Docker's proxy accepted the TCP connection while
+  the NodePort behind it was gone).
+  Dropping the mapping itself needs an explicit recreate, and that is worth knowing before
+  changing any published port: the k3d provider **cannot update a running cluster**
+  (`Error: Updating clusters is not supported by k3d`), and because the same apply replaces
+  `local_sensitive_file.kubeconfig` (destroy, then create), a failed apply additionally
+  leaves the machine **without a kubeconfig file**. Hence
+  `terraform apply -replace=k3d_cluster.sock_shop`; verified after the recreate:
+  `docker ps` no longer lists `3000->31300` and nothing listens on host port 3000.
+- **`GF_SECURITY_ADMIN_PASSWORD: admin` in the manifest.** Both the Deployment and the
+  import Job now read `GF_SECURITY_ADMIN_USER` / `GF_SECURITY_ADMIN_PASSWORD` from the
+  `grafana-admin` Secret (`secretKeyRef`, `optional: false`), and the Job uses
+  `curl --user "$GRAFANA_USER:$GRAFANA_PASSWORD"`, so the password is not in the argument
+  list of the process either. `deploy.ps1` creates the Secret idempotently: it **reuses**
+  an existing one - Grafana keeps the admin password in its own database, so regenerating
+  the Secret on every run would silently lock you out of a running instance - generates a
+  random password when there is none, and `GRAFANA_ADMIN_PASSWORD` overrides both.
+  Template: `manifests-monitoring/examples/grafana-admin-secret.example.yaml`.
+  Proven from scratch: delete the Secret -> the pod stays `0/1` with
+  `GF_SECURITY_ADMIN_USER: <set to the key 'admin-user' in secret 'grafana-admin'>`,
+  `Optional: false`; recreate it -> rollout completes, the Ingress login works with the
+  new password and `admin`/`admin` answers `401`.
+- **The import Job reported success while importing nothing.** Two independent bugs:
+  1. its shell script was a **folded YAML block (`>`)**. A folded block joins the lines
+     with spaces, so `fi` + `done` turned into the single word `fidone` and the leading
+     `#` comment swallowed the rest of the script - and with no outcome check the Job
+     still finished as `Completed`. It is a literal block (`|`) now, with a comment in the
+     manifest saying why it must stay that way;
+  2. the `wait-for-grafana` init container waited for `/api/health`, which answers even
+     from the **previous** pod - the one still running with the previous password. On a
+     redeploy the importer authenticated with the new password against the old pod and got
+     `401` for every file (observed live: `importing ... 401`, Job `Completed`).
+     It now waits until the credentials from the Secret are actually accepted
+     (`curl -f --user ... /api/datasources`, up to ~4 minutes), and after the loops it
+     **verifies the outcome** instead of trusting exit codes: it asks Grafana for the
+     number of dashboards and datasources and fails the Job when the answer is zero. The
+     datasource loop also separates `409 Conflict` ("already exists in grafana - kept as
+     is") from a real error, so a healthy redeploy no longer prints bare `curl: (22)`.
+
+  Live proof: a redeploy logs `grafana now reports 7 dashboards and 3 datasources` +
+  `import finished`, Job `Complete 1/1` in ~8s; on a *fresh* Grafana database all three
+  datasources are created and the import still ends with 7 dashboards;
+  `curl -H 'Host: grafana.localhost' http://localhost:8080/api/health` ->
+  `{"commit":"b5190ee547","database":"ok","version":"7.5.5"}`; `GET /api/datasources` ->
+  `200` for the Secret password, `401` for `admin`/`admin`, `401` without auth.
+
+  The lesson worth keeping: a one-shot Job needs an **outcome assertion**, otherwise
+  "green" only means "the shell exited 0". Here the fix for the 401 bug and the fix for
+  the silent-success bug were the same edit.
+
+Two leftovers of the same class lived outside the Kubernetes path, and they were closed in
+the same pass: "no credentials in files" is a property of the repository, not of one
+directory.
+
+- `deploy/docker-compose/docker-compose.monitoring.yml` hard-coded
+  `GF_SECURITY_ADMIN_PASSWORD=foobar`, and `deploy/docker-compose/grafana/import.sh` posted
+  to `http://admin:foobar@grafana:3000/...` - the very same default-credential pattern, in
+  the stand's second (compose) entry point. The password now comes from
+  `${GRAFANA_ADMIN_PASSWORD:?...}` (compose fails with an explicit message when it is
+  unset, instead of starting with a well-known one) and `import.sh` reads
+  `GRAFANA_USER` / `GRAFANA_PASSWORD` from the environment. Every published port in that
+  file also binds to `127.0.0.1`: written as `3000:3000` a port is published on **every**
+  interface of the host, exactly like the NodePort that was removed here.
+- the archived copy `manifests-monitoring/legacy/23-grafana-import-dash-batch.yaml` still
+  carried `http://admin:admin@grafana/...` in its script. It is masked to
+  `admin:<password>` now: an archive is kept for structure, not for credentials, and the
+  legacy README says so in both languages.
+
+Finally, the fix is protected in CI. The `manifests-validate` job runs a **`Guard Grafana
+access`** step that fails on (1) a literal credential on an active line of an applyable
+manifest, (2) `GF_SECURITY_ADMIN_*` that is not followed by `valueFrom`, (3) the Grafana
+Service turning back into a `NodePort` or losing its Ingress, (4) a folded YAML block (`>`)
+in the import Job. None of these is a schema error, so `kubeconform` cannot see any of
+them - and all four were real defects at some point in this section.
+
+The pass ended with one more defect, in the stand's own orchestrator, and it is worth writing
+down because it only appears in a specific combination. `deploy.ps1` probes twice for
+something that is *allowed* to be absent: an existing `grafana-admin` Secret, and the new
+rules file inside the running Prometheus container. Both probes were written the obvious way
+- `kubectl ... 2>$null` and then look at `$LASTEXITCODE`. On Windows PowerShell 5.1 that is
+not enough: with `$ErrorActionPreference = "Stop"` (line 45 of the script) a single byte on a
+native command's stderr becomes a TERMINATING error, and the redirection does not prevent it.
+Verified in isolation on 5.1: `kubectl get secret <absent> -o jsonpath=... 2>$null` throws
+`NativeCommandError`. The consequence on a freshly created cluster was that the run stopped
+dead in section 5/6 with `Error from server (NotFound): secrets "grafana-admin" not found` -
+that is, exactly on the "first run against a new cluster" path, while every re-run stayed
+green because by then the Secret existed. Both probes now go through a small
+`Invoke-QuietProbe` helper: it lowers `$ErrorActionPreference` to `Continue` for the duration
+of the call, merges stderr into the pipeline and drops the error records, and hands the exit
+code back as data - so "the Secret is not there yet" is an answer, not a crash. Verified: the
+probe returns `exit=1, output=''` for an absent Secret without throwing, and a full run on a
+fresh cluster now reaches 6/6.
+

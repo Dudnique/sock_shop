@@ -1,0 +1,41 @@
+---
+# Grafana is reached through the SAME Traefik entrypoint as the application
+# (host port 8080), but on a different HOST name.
+#
+# Why a host and not a port: a port is a TCP-level concept - one listener can
+# only serve one thing. Traefik is an HTTP (L7) proxy, so it demultiplexes
+# requests by the `Host` header: `http://localhost:8080` hits the host-less rule
+# of the `front-end` Ingress, `http://grafana.localhost:8080` hits this rule.
+# That is the same trick as `server_name` in nginx (name-based virtual hosts),
+# so no extra published port is needed.
+#
+# The host name must resolve on the machine that runs the browser:
+#   127.0.0.1 grafana.localhost        -> C:\Windows\System32\drivers\etc\hosts
+# Without that line, use the fallback that needs no privileges:
+#   kubectl port-forward -n monitoring svc/grafana 3000:80
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+    component: core
+  annotations:
+    # The `front-end` Ingress matches every host with `PathPrefix('/')`. Traefik
+    # already prefers the longer (more specific) rule, but the priority is set
+    # explicitly so routing does not depend on that heuristic.
+    traefik.ingress.kubernetes.io/router.priority: "100"
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: grafana.localhost
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 80

@@ -32,11 +32,27 @@ spec:
             cpu: 100m
             memory: 100Mi
         env:
-          # The following env variables set up basic auth twith the default admin user and admin password.
+          # Admin credentials come from the `grafana-admin` Secret (created by
+          # deploy.ps1, or by hand from examples/grafana-admin-secret.example.yaml).
+          # They used to be hard-coded admin/admin while the Service was a
+          # NodePort published to the host: a default password reachable from
+          # every interface of the host machine.
           - name: GF_SECURITY_ADMIN_USER
-            value: admin
+            valueFrom:
+              secretKeyRef:
+                name: grafana-admin
+                key: admin-user
           - name: GF_SECURITY_ADMIN_PASSWORD
-            value: admin
+            valueFrom:
+              secretKeyRef:
+                name: grafana-admin
+                key: admin-password
+          # Both default to false; declared explicitly so that an image bump (or
+          # a future values file) cannot silently open the stand up.
+          - name: GF_AUTH_ANONYMOUS_ENABLED
+            value: "false"
+          - name: GF_USERS_ALLOW_SIGN_UP
+            value: "false"
         readinessProbe:
           httpGet:
             path: /login

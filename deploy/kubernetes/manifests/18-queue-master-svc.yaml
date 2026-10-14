@@ -3,8 +3,13 @@ apiVersion: v1
 kind: Service
 metadata:
   name: queue-master
-  annotations:
-        prometheus.io/scrape: 'true'
+  # No prometheus.io/scrape here on purpose. queue-master is the one Java service
+  # in this stack that exposes Spring Boot Actuator metrics as JSON
+  # ({"mem":...,"heap.used":...}) on /metrics and has NO Prometheus endpoint
+  # (/actuator/prometheus -> 404), so scraping it could only ever produce a
+  # permanently DOWN target. It used to be announced as scrapable, which made
+  # Prometheus report "expected a valid start token, got \"{\"" forever - a
+  # broken target nobody noticed until a ScrapeTargetDown rule was added.
   labels:
     name: queue-master
   namespace: sock-shop

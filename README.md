@@ -39,17 +39,32 @@ kubectl version --client
 .\deploy.ps1
 ```
 
-The script is a thin orchestrator and does **six** things:
+The script is a thin orchestrator and does **six** things, plus an optional seventh:
 
 1. provisions the k3d cluster with **Terraform** (`terraform/k3d`) - the single
    source of truth for the infrastructure;
 2. applies the application manifests (`deploy/kubernetes/manifests`);
 3. applies the logging stack (`deploy/kubernetes/manifests-logging` - Loki + Promtail);
 4. applies the tracing stack (`deploy/kubernetes/manifests-jaeger`);
-5. applies the monitoring stack (`deploy/kubernetes/manifests-monitoring`);
-6. applies the alerting stack (`deploy/kubernetes/manifests-alerting`) plus its secrets.
+5. applies the monitoring stack (`deploy/kubernetes/manifests-monitoring`) and then does
+   three extra things that plain `kubectl apply` cannot: it waits until the alert-rule
+   ConfigMap has actually been refreshed **inside the running pod**, validates the mounted
+   rule file with `promtool check rules`, and only then triggers `POST /-/reload`.
+   Prometheus re-reads rule files at startup only, and a malformed rule file is **not**
+   fatal - it logs an error and keeps serving requests **without those alerts**. A silent
+   monitoring gap is worse than a failed deployment, so an invalid file aborts the script;
+6. applies the alerting stack (`deploy/kubernetes/manifests-alerting`) plus its secrets;
+7. *(optional, `-WithLoadtest`)* applies the load generator (`deploy/kubernetes/manifests-loadtest`).
 
 The shop then opens at **http://localhost:8080**.
+
+Bring the stand up with traffic - the load generator is what makes dashboards, alert rules
+and traces non-empty, so it is the recommended way to run a demo:
+
+```powershell
+.\deploy.ps1 -WithLoadtest
+```
+
 
 To tear the whole stand down again:
 
@@ -97,12 +112,28 @@ kubectl apply -f deploy\kubernetes\manifests-jaeger
 # 5. Monitoring
 kubectl apply -f deploy\kubernetes\manifests-monitoring
 
+# 5b. Prometheus re-reads rule files at startup only, and a malformed rule file is
+#     not fatal: it logs an error and keeps running WITHOUT those alerts. So validate
+#     the mounted file first, then reload without a restart (a restart would wipe the
+#     TSDB, which lives on emptyDir):
+kubectl -n monitoring exec deploy/prometheus-deployment -- `
+    promtool check rules /etc/prometheus-rules/alert.rules
+kubectl -n monitoring exec deploy/prometheus-deployment -- `
+    wget -q -O- --post-data='' http://localhost:9090/-/reload
+#     .\deploy.ps1 also waits here until the ConfigMap file has actually been refreshed
+#     inside the pod (kubelet does that asynchronously, up to ~2 minutes) - otherwise
+#     the reload would silently re-read the OLD file.
+
 # 6. Alerting - the secret must exist first, then apply the manifests
 kubectl -n monitoring create secret generic alertmanager-secrets `
     --from-literal=telegram_bot_token=$env:TELEGRAM_BOT_TOKEN `
     --from-literal=slack_webhook_url=$env:SLACK_WEBHOOK_URL `
     --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f deploy\kubernetes\manifests-alerting
+
+# 7. (optional) load generator - without traffic the dashboards stay empty and the
+#    alert rules have nothing to fire on
+kubectl apply -f deploy\kubernetes\manifests-loadtest
 ```
 
 The application can also be applied from a single file:
@@ -110,24 +141,62 @@ The application can also be applied from a single file:
 
 ## Accessing the application and tools
 
-Everything is reachable from the host **without** `kubectl port-forward`: the host
-ports are published by `terraform/k3d`.
+Everything except Grafana's ingress is reachable from the host **without**
+`kubectl port-forward`: the host ports are published by `terraform/k3d`. Grafana
+is reached through Traefik on a host name of its own (see below).
 
 | Port  | URL | What |
 |-------|-----|------|
 | 8080  | <http://localhost:8080>  | Sock Shop (through Traefik/Ingress) |
+| 8080  | <http://grafana.localhost:8080> | Grafana (same Traefik entrypoint, own `Host` header) |
 | 9090  | <http://localhost:9090>  | Prometheus |
-| 3000  | <http://localhost:3000>  | Grafana |
 | 9093  | <http://localhost:9093>  | Alertmanager |
 | 16686 | <http://localhost:16686> | Jaeger UI (traces) |
 
-Grafana (login `admin` / `admin`) is the single entry point for both the logs and
-the traces: it comes with a `loki` datasource (logs) and a `jaeger` datasource
-(traces), both defined in `manifests-monitoring/20-grafana-configmap.yaml` and
-imported by the `grafana-import-dashboards` Job. Loki has **no** UI and **no**
-host port on purpose - it is an internal store queried only by Grafana
+Grafana is the single entry point for both the logs and the traces: it comes with
+a `loki` datasource (logs) and a `jaeger` datasource (traces), both defined in
+`manifests-monitoring/20-grafana-configmap.yaml` and imported by the
+`grafana-import-dashboards` Job. Loki has **no** UI and **no** host port on
+purpose - it is an internal store queried only by Grafana
 (`http://loki.logging.svc.cluster.local:3100`): read the logs in **Explore** with
 the `loki` datasource, e.g. the query `{namespace="sock-shop"}`.
+
+Grafana's Service is `ClusterIP` and no longer published on a host port: as a
+`NodePort` it was reachable on **every** interface of the machine with the default
+`admin`/`admin`. It is served by the same Traefik entrypoint as the application
+and distinguished by the HTTP `Host` header - one port, several backends, the same
+idea as `server_name` in nginx:
+
+```powershell
+# one-off, in an editor started as Administrator, add a line to
+#   C:\Windows\System32\drivers\etc\hosts
+#   127.0.0.1 grafana.localhost
+# then browse to http://grafana.localhost:8080
+# no hosts entry (or no admin rights)? use the tunnel instead:
+kubectl port-forward -n monitoring svc/grafana 3000:80   # http://localhost:3000
+```
+
+The admin password is not in the repository either: `deploy.ps1` creates the
+`grafana-admin` Secret - reusing an existing one, because Grafana keeps the
+password in its own database - and both the Deployment and the import Job read
+the credentials from it. Set `GRAFANA_ADMIN_PASSWORD` to choose your own value;
+otherwise a random one is generated and printed at the end of the deploy.
+
+### Monitoring and alerting at a glance
+
+| What | Where | Notes |
+|---|---|---|
+| Metrics | Prometheus <http://localhost:9090> | app targets are auto-discovered from pod/Service annotations; plus `node-exporter` (3 nodes) and `kube-state-metrics` |
+| Dashboards | Grafana <http://grafana.localhost:8080> | 7 dashboards and 3 datasources imported by the `grafana-import-dashboards` Job |
+| Alerts | Prometheus rules + Alertmanager <http://localhost:9093> | 11 rules in 4 groups - `availability`, `application`, `infrastructure`, `meta`; delivered to Telegram and Slack |
+| Probes | `blackbox-exporter` | two paths, labelled `probe_scope`: `ingress` (Traefik Service) and `external` (the published port, `host.docker.internal:8080`) |
+| Logs | Loki (only through Grafana **Explore**) | no UI and no host port on purpose |
+
+The `meta` group is the one worth explaining: `ScrapeTargetDown` fires when a **scrape
+target itself** stops answering - it watches the monitoring instead of the application.
+Adding it immediately exposed three targets that had been permanently DOWN in the config
+(a wrong exporter port, a service that only serves Actuator JSON, and a wrong
+Alertmanager metrics path) - see [FIXES.md](./FIXES.md), section 11.
 
 The front-end Service is `ClusterIP`: the app is reachable **only** through the
 Ingress (Traefik) on port `8080`. It used to be a `NodePort` on `30001` before the
@@ -152,6 +221,7 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 │       ├── manifests-jaeger/               # Jaeger all-in-one (traces)
 │       ├── manifests-monitoring/           # Prometheus, Grafana, exporters
 │       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
+│       ├── manifests-loadtest/             # optional locust load generator
 │       ├── complete-demo.yaml              # application in one file
 │       └── helm-chart/                     # alternative: Helm chart
 └── terraform/

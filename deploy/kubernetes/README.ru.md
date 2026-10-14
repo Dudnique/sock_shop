@@ -41,14 +41,20 @@ Docker + `make` для этого жила в этом каталоге; она 
 
 ### Порты
 
-Grafana публикуется на NodePort `31300`, Prometheus — на `31090`. Если кластер
-«настоящий», проще всего дотянуться до этих портов пробросом через ssh:
+Prometheus публикуется на NodePort `31090`. Если кластер «настоящий», проще всего
+дотянуться до него пробросом через ssh:
 
 ```
-ssh -i $KEY -L 3000:$NODE_IN_CLUSTER:31300 -L 9090:$NODE_IN_CLUSTER:31090 ubuntu@$BASTION_IP
+ssh -i $KEY -L 9090:$NODE_IN_CLUSTER:31090 ubuntu@$BASTION_IP
 ```
 
-куда подставляются нужные значения. Grafana и Prometheus будут доступны на
-`http://localhost:3000` и `:9090`.
+куда подставляются нужные значения. Prometheus будет доступен на
+`http://localhost:9090`.
+
+Grafana — это `ClusterIP`-сервис, на хост-порт она не публикуется вовсе: как
+NodePort `31300` она была доступна на всех интерфейсах машины с паролем по
+умолчанию `admin`/`admin`, поэтому теперь идёт через Ingress:
+`http://grafana.localhost:8080` (см. `manifests-monitoring/30-grafana-ingress.yaml`).
+Без строки в hosts используй `kubectl port-forward -n monitoring svc/grafana 3000:80`.
 
 На Minikube можно подключаться по IP виртуалки и NodePort.

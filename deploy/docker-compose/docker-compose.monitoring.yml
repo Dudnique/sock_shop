@@ -1,5 +1,21 @@
 version: '2'
 
+# Local single-machine monitoring stack: Prometheus + node-exporter +
+# Alertmanager + Grafana + a one-shot dashboard importer.
+#
+# Two deliberate choices, both mirroring the Kubernetes stack (see
+# deploy/kubernetes/manifests-monitoring/22-grafana-svc.yaml and FIXES.md 12):
+#   * every published port binds to 127.0.0.1 explicitly, because `- 3000:3000`
+#     means "listen on EVERY interface of the host" (office Wi-Fi included);
+#   * Grafana's admin password is NOT in this file: it comes from the
+#     environment, and compose refuses to start without it - a fail-fast is
+#     better than a well-known default credential on a reachable port.
+#
+# Usage (see README.md / README.ru.md):
+#   $env:GRAFANA_ADMIN_PASSWORD = 's3cret'   # PowerShell
+#   export GRAFANA_ADMIN_PASSWORD=s3cret     # bash
+#   docker compose -f docker-compose.monitoring.yml up
+
 services:
     prometheus:
         image: prom/prometheus
@@ -15,7 +31,10 @@ services:
         expose:
           - 9090
         ports:
-          - 9090:9090
+          # 127.0.0.1 is not decoration: without it Docker publishes the port on
+          # all interfaces. These UIs have no authentication at all, so they are
+          # reachable from this machine only.
+          - '127.0.0.1:9090:9090'
         links:
           - alertmanager:alertmanager
     nodeexporter:
@@ -28,11 +47,11 @@ services:
           - '--path.rootfs=/host'
         restart: unless-stopped
         ports:
-          - 9100:9100
+          - '127.0.0.1:9100:9100'
     alertmanager:
         image: prom/alertmanager
         ports:
-          - 9093:9093
+          - '127.0.0.1:9093:9093'
         volumes:
           - ./alertmanager.yml:/etc/alertmanager/config.yml
         command:
@@ -43,9 +62,15 @@ services:
         depends_on:
           - prometheus
         ports:
-          - 3000:3000
+          # Loopback only, same reasoning as the Kubernetes Service: as
+          # `3000:3000` it listened on every interface of the host.
+          - '127.0.0.1:3000:3000'
         environment:
-          - GF_SECURITY_ADMIN_PASSWORD=foobar
+          # No password in this file. It used to be `foobar` right here, i.e. a
+          # credential in git. `${VAR:?msg}` makes compose fail with that
+          # message before anything starts.
+          - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+          - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD before docker compose up (see README.md)}
           - GF_USERS_ALLOW_SIGN_UP=false
         links:
           - prometheus:prometheus
@@ -55,6 +80,11 @@ services:
         - grafana
       entrypoint: /bin/sh import.sh
       working_dir: /opt/grafana-import-dashboards
+      environment:
+        # The importer logs in with the same credentials as Grafana itself; they
+        # are passed through from the environment, never written into import.sh.
+        - GRAFANA_USER=${GRAFANA_ADMIN_USER:-admin}
+        - GRAFANA_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD before docker compose up (see README.md)}
       volumes:
         - ./grafana:/opt/grafana-import-dashboards
       links:

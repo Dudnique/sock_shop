@@ -7,7 +7,12 @@ metadata:
     name: alertmanager
   annotations:
     prometheus.io/scrape: 'true'
-    prometheus.io/path: '/alertmanager/metrics'
+    # Alertmanager serves its own metrics on /metrics (verified: the response
+    # starts with "# HELP alertmanager_alerts"). The old value
+    # '/alertmanager/metrics' was a path that does not exist -> HTTP 404, i.e. a
+    # permanently DOWN target that only became visible once a ScrapeTargetDown
+    # rule existed.
+    prometheus.io/path: '/metrics'
 spec:
   # NodePort so the host can reach it. The port matches the Terraform host
   # mapping `9093:30903` in terraform/k3d/main.tf.

@@ -42,7 +42,7 @@ variable "ingress_https_port" {
 variable "exposed_node_ports" {
   description = <<-EOT
     Extra host-port : NodePort mappings published for the tooling
-    (Prometheus, Grafana, Alertmanager, Jaeger, ...).
+    (Prometheus, Alertmanager, Jaeger, ...).
 
     Each KEY is a host port, each VALUE the Kubernetes NodePort it forwards to.
     The mapping is attached to the first server node, so the tool becomes
@@ -52,8 +52,18 @@ variable "exposed_node_ports" {
   EOT
   type        = map(number)
   default = {
-    "9090"  = 31090 # Prometheus (manifests-monitoring/07-prometheus-svc.yaml)
-    "3000"  = 31300 # Grafana    (manifests-monitoring/22-grafana-svc.yaml)
+    "9090" = 31090 # Prometheus (manifests-monitoring/07-prometheus-svc.yaml)
+    # Grafana is deliberately NOT published any more. It used to be a NodePort
+    # on 31300, i.e. reachable on every interface of the host with the default
+    # admin/admin credentials. Its Service is ClusterIP now and Grafana is
+    # published through Traefik instead: see
+    # deploy/kubernetes/manifests-monitoring/30-grafana-ingress.yaml
+    # (host `grafana.localhost` on ingress_http_port).
+    #
+    # NOTE: the k3d provider CANNOT modify a running cluster ("Error: Updating
+    # clusters is not supported by k3d"), so changing this map needs an explicit
+    # recreate - a plain `terraform apply` fails:
+    #     terraform apply -replace=k3d_cluster.sock_shop
     "9093"  = 30903 # Alertmanager (manifests-alerting/alertmanager-svc.yaml)
     "16686" = 30686 # Jaeger UI  (manifests-jaeger/jaeger.yaml)
   }

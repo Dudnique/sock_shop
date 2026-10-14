@@ -29,44 +29,107 @@ spec:
       - name: wait-for-grafana
         image: giantswarm/tiny-tools
         imagePullPolicy: IfNotPresent
+        # The credentials are needed here too: /api/health answers even from the
+        # PREVIOUS pod, which still has the previous password. Waiting for health
+        # alone is therefore not enough - it produced a real 401 race in this
+        # repository (the import Job ran against the old pod and failed silently,
+        # while still reporting "Completed"). So wait until the credentials from
+        # the Secret are actually accepted.
+        env:
+        - name: GRAFANA_USER
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-user
+        - name: GRAFANA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-password
         command: ["/bin/sh", "-c"]
         args:
-        - >
-          until curl -s -f http://grafana/api/health > /dev/null; do
-            echo "waiting for grafana to become ready...";
-            sleep 2;
-          done;
-          echo "grafana is ready";
+        - |
+          i=0
+          until curl -s -f --max-time 10 --user "$GRAFANA_USER:$GRAFANA_PASSWORD" http://grafana/api/datasources > /dev/null; do
+            i=$((i+1))
+            if [ "$i" -gt 120 ]; then
+              echo "grafana answers on /api/health but REJECTS the grafana-admin credentials - refusing to import dashboards"
+              exit 1
+            fi
+            echo "waiting for grafana to accept the admin credentials..."
+            sleep 2
+          done
+          echo "grafana is ready and authenticates with the Secret credentials";
       containers:
       - name: grafana-import-dashboards
         image: giantswarm/tiny-tools
         command: ["/bin/sh", "-c"]
         workingDir: /opt/grafana-import-dashboards
+        # Credentials are taken from the `grafana-admin` Secret instead of being
+        # baked into the manifest as the default admin password. curl reads them
+        # from the environment via --user, so the password never shows up in the
+        # argument list of the process (visible in `ps`) or in the Job spec.
+        env:
+        - name: GRAFANA_USER
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-user
+        - name: GRAFANA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-password
+        # NOTE: this must stay a LITERAL block ("|") and never become a folded one
+        # (">"). A folded block joins the lines with spaces, which silently turns
+        # "fi" + "done" into "fidone" and lets a "#" comment swallow the rest of
+        # the script - and the Job still reported success. Fixed, but do not
+        # "tidy" it back: the shell script is kept verbatim, line by line.
         args:
-          - >
+          - |
             for file in *-datasource.json ; do
               if [ -e "$file" ] ; then
-                echo "importing $file" &&
-                curl --silent --fail --show-error \
-                  --request POST http://admin:admin@grafana/api/datasources \
+                echo "importing $file"
+                code=$(curl -s -o /tmp/response.json -w '%{http_code}' --max-time 20 \
+                  --user "$GRAFANA_USER:$GRAFANA_PASSWORD" \
+                  --request POST http://grafana/api/datasources \
                   --header "Content-Type: application/json" \
                   --header "Accept: application/json" \
-                  --data-binary "@$file" ||
-                  echo "(datasource already exists - kept as is)" ;
-                echo "" ;
+                  --data-binary "@$file")
+                case "$code" in
+                  200|201) echo "  created" ;;
+                  409) echo "  (already exists in grafana - kept as is)" ;;
+                  *) echo "  ERROR: HTTP $code"; cat /tmp/response.json ;;
+                esac
               fi
-            done ;
+            done
             for file in *-dashboard.json ; do
               if [ -e "$file" ] ; then
-                echo "importing $file" &&
-                curl --silent --fail --show-error \
-                  --request POST http://admin:admin@grafana/api/dashboards/import \
+                echo "importing $file"
+                curl --silent --fail --show-error --max-time 20 \
+                  --user "$GRAFANA_USER:$GRAFANA_PASSWORD" \
+                  --request POST http://grafana/api/dashboards/import \
                   --header "Content-Type: application/json" \
                   --header "Accept: application/json" \
-                  --data-binary "@$file" ;
-                echo "" ;
+                  --data-binary "@$file"
+                echo ""
               fi
-            done ;
+            done
+            # Verify the OUTCOME, not the individual exit codes. A datasource that
+            # already exists answers with a 4xx that is expected and harmless,
+            # while rejected credentials would otherwise leave this Job in the
+            # "Completed" state with nothing imported - a green Job that did
+            # nothing is exactly the silent failure this repository avoids.
+            curl -s --max-time 20 --user "$GRAFANA_USER:$GRAFANA_PASSWORD" \
+              "http://grafana/api/search?type=dash-db" > /tmp/dashboards.json
+            curl -s --max-time 20 --user "$GRAFANA_USER:$GRAFANA_PASSWORD" \
+              http://grafana/api/datasources > /tmp/datasources.json
+            echo "grafana now reports $(grep -o '"uid"' /tmp/dashboards.json | wc -l) dashboards and $(grep -o '"name"' /tmp/datasources.json | wc -l) datasources"
+            grep -q '"uid"' /tmp/dashboards.json && grep -q '"name"' /tmp/datasources.json || {
+              echo "ERROR: nothing was imported - check the 401/403 above and the grafana-admin Secret"
+              exit 1
+            }
+            echo "import finished"
         volumeMounts:
         - name: config-volume
           mountPath: /opt/grafana-import-dashboards

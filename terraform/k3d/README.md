@@ -50,15 +50,33 @@ The cluster publishes two kinds of host ports:
 |---|---|---|---|
 | `ingress_http_port` (default `8080`) | `80` | load balancer | Sock Shop through Traefik/Ingress |
 | `ingress_https_port` (default `8443`) | `443` | load balancer | HTTPS (reserved for TLS) |
-| every key of `exposed_node_ports` | matching NodePort | first server node | tooling: Prometheus `9090`, Grafana `3000`, Alertmanager `9093`, Jaeger UI `16686` |
+| every key of `exposed_node_ports` | matching NodePort | first server node | tooling: Prometheus `9090`, Alertmanager `9093`, Jaeger UI `16686` |
 
 Why two mechanisms: the app is routed by the ingress controller (Traefik) on the
 cluster's single load balancer, while the tools are exposed directly through their
 NodePorts. NodePorts are served by nodes, not by the load balancer, hence the
 `server:0` node filter.
 
+Grafana is deliberately **not** in that list any more. It used to be NodePort `31300`
+published as host port `3000`, which means "reachable on every interface of the machine",
+and it answered with the default `admin`/`admin`. Its Service is `ClusterIP` now and Grafana
+is served through the same Traefik entrypoint as the application, distinguished by the HTTP
+`Host` header: `deploy/kubernetes/manifests-monitoring/30-grafana-ingress.yaml`, host
+`grafana.localhost` (see `FIXES.md`, section 12).
+
 To expose a new tool, append one line to `exposed_node_ports` in `variables.tf`
-(or override it in `terraform.tfvars`) and re-`apply`. Nothing else changes.
+(or override it in `terraform.tfvars`) and re-`apply`. Nothing else changes - with one
+caveat that costs time if you do not know it: the k3d provider **cannot modify an existing
+cluster** (`Error: Updating clusters is not supported by k3d`), so a change to the published
+ports needs an explicit recreate:
+
+```bash
+terraform apply -replace=k3d_cluster.sock_shop
+```
+
+A plain `terraform apply` fails on that change, and since the same apply also replaces the
+generated kubeconfig file (destroy, then create), the failure leaves you **without a
+kubeconfig**. `deploy.ps1` now stops on terraform's non-zero exit instead of carrying on.
 
 ## Layout
 

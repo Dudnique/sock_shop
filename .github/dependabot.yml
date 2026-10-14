@@ -1,0 +1,61 @@
+# Automated dependency updates (Dependabot).
+#
+# What it does: opens a PR when one of the pinned dependencies has a newer
+# version. NOTHING is merged automatically - every PR runs the `ci` workflow and
+# a human merges it.
+#
+# Scope is deliberately narrow: only places where a stale pin actually hurts.
+#  - github-actions: the `uses:` pins in .github/workflows/main.yaml. These are
+#    exactly the pins that had to be bumped by hand when GitHub retired the
+#    node20 runner (commit 05cd3bb), so this is the highest-value ecosystem here.
+#  - terraform: the provider/version pins under terraform/.
+#  - docker: the two helper images built from this repo (openapi/, healthcheck/).
+#
+# MAJOR updates are intentionally NOT opened: a new major of an action, provider
+# or base image changes behaviour (runtimes, defaults, removed arguments) and is
+# a conscious decision, not a chore. Minors and patches arrive as PRs and are
+# gated by CI kubeconform/terraform-validate.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      github-actions:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: terraform
+    directory: /terraform/k3d
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "infra(deps)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: docker
+    directory: /openapi
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: docker
+    directory: /healthcheck
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "build(deps)"

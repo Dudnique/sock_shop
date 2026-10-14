@@ -35,6 +35,12 @@ jobs:
   #    Kubernetes cluster (kindest/node:v1.20.0) and regularly timed out on CI
   #    runners, because starting that old cluster + pulling all images took
   #    longer than the job's 10 minute limit.
+  #
+  #    ALL directories that hold applyable manifests are checked, not just
+  #    manifests/: a typo in the logging/monitoring/alerting stacks would
+  #    otherwise only surface at deploy time. Two things are deliberately left
+  #    out: legacy/ directories (archived, non-applyable API versions kept for
+  #    history) and helm-chart/ (rendered + validated by helm-chart-validate).
   # ---------------------------------------------------------------------------
   manifests-validate:
     runs-on: ubuntu-latest
@@ -44,8 +50,82 @@ jobs:
       run: |
         docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:latest \
           -strict -summary -ignore-missing-schemas \
+          -ignore-filename-pattern '.*/legacy/.*' \
           /work/deploy/kubernetes/manifests \
-          /work/deploy/kubernetes/complete-demo.yaml
+          /work/deploy/kubernetes/complete-demo.yaml \
+          /work/deploy/kubernetes/manifests-logging \
+          /work/deploy/kubernetes/manifests-jaeger \
+          /work/deploy/kubernetes/manifests-monitoring \
+          /work/deploy/kubernetes/manifests-alerting \
+          /work/deploy/kubernetes/manifests-loadtest \
+          /work/deploy/kubernetes/manifests-policy \
+          /work/deploy/kubernetes/autoscaling
+    # The Prometheus rules are NOT Kubernetes manifests (no apiVersion/kind:
+    # they are a rule file, embedded in a ConfigMap data key), so kubeconform
+    # cannot see them. That is exactly why a broken rule is dangerous here:
+    # Prometheus treats a malformed rule file as NON-fatal - it logs an error
+    # and keeps running WITHOUT those alerts. A silent monitoring gap is worse
+    # than a crash, and promtool is the only thing that catches a bad PromQL
+    # expression or a broken rule structure before it is applied.
+    - name: Validate Prometheus rules (promtool)
+      run: |
+        docker run --rm -e RULES_KEY=alert.rules -v "$PWD:/work" mikefarah/yq:4.44.3 \
+          eval -r '.data[env(RULES_KEY)]' \
+          /work/deploy/kubernetes/manifests-monitoring/05-prometheus-alertrules.yaml > alert.rules
+        docker run --rm -v "$PWD:/work" --entrypoint promtool \
+          prom/prometheus:v2.45.6 check rules /work/alert.rules
+
+    # The Grafana access problem (FIXES.md, section 12) is not a schema error, so
+    # kubeconform cannot see its three comebacks: a literal credential in a
+    # manifest, Grafana published on a host port again, and a FOLDED YAML block
+    # (">") for the import Job's shell script - folded blocks join lines with
+    # spaces, so "fi" + "done" become "fidone" and a "#" comment swallows the
+    # rest of the script, while the Job still reports Completed.
+    # legacy/ is deliberately out of scope (archived, non-applyable).
+    - name: Guard Grafana access (no literal creds, ClusterIP, literal shell block)
+      run: |
+        set -eu
+        mon=deploy/kubernetes/manifests-monitoring
+
+        # 1) No literal credential on an active (non-comment) line.
+        if grep -nE 'admin:admin|admin:[A-Za-z0-9._-]+@' "$mon"/*.yaml \
+             | grep -vE ':[0-9]+:[[:space:]]*#'; then
+          echo "::error::a default Grafana credential is back in a manifest"
+          exit 1
+        fi
+
+        # 2) GF_SECURITY_ADMIN_* must be fed from the Secret, never inline: the
+        #    env entry has to be followed by valueFrom, not by value.
+        awk '
+          /name: *GF_SECURITY_ADMIN_(USER|PASSWORD)/  { want = NR + 1; next }
+          want && NR == want {
+            if ($0 !~ /valueFrom/) {
+              print "::error::" FILENAME ":" NR ": literal value instead of secretKeyRef: " $0
+              bad = 1
+            }
+            want = 0
+          }
+          END { exit bad }
+        ' "$mon"/*.yaml
+
+        # 3) Grafana stays a ClusterIP Service reached through the Ingress.
+        #    Both patterns are anchored to a YAML field ("  nodePort:"), so a
+        #    comment that merely mentions the old NodePort cannot trip them.
+        grep -qE '^[[:space:]]*type:[[:space:]]*ClusterIP' "$mon/22-grafana-svc.yaml"
+        if grep -nE '^[[:space:]]*nodePort:' "$mon/22-grafana-svc.yaml"; then
+          echo "::error::the Grafana Service is published on a host port again"
+          exit 1
+        fi
+        grep -qE '^[[:space:]]*kind:[[:space:]]*Ingress' "$mon/30-grafana-ingress.yaml"
+
+        # 4) The import Job keeps LITERAL shell blocks.
+        if grep -nE '^[[:space:]]*-[[:space:]]+>[[:space:]]*$' "$mon/23-grafana-import-dash-batch.yaml"; then
+          echo "::error::the import Job uses a folded block (>) - fi+done would become fidone"
+          exit 1
+        fi
+        grep -qE '^[[:space:]]*-[[:space:]]+\|[[:space:]]*$' "$mon/23-grafana-import-dash-batch.yaml"
+
+        echo "OK: Grafana guards passed"
 
   # ---------------------------------------------------------------------------
   # 3) Helm chart sanity check (no cluster required).

@@ -33,10 +33,12 @@ To use them, please run `kubectl create -f <path to directory>`.
 
 ### Ports
 
-Grafana will be exposed on the NodePort `31300` and Prometheus is exposed on `31090`. If running on a real cluster, the easiest way to connect to these ports is by port forwarding in a ssh command:
+Prometheus is exposed on the NodePort `31090`. If running on a real cluster, the easiest way to connect to it is by port forwarding in a ssh command:
 ```
-ssh -i $KEY -L 3000:$NODE_IN_CLUSTER:31300 -L 9090:$NODE_IN_CLUSTER:31090 ubuntu@$BASTION_IP
+ssh -i $KEY -L 9090:$NODE_IN_CLUSTER:31090 ubuntu@$BASTION_IP
 ```
-Where all the pertinent information should be entered. Grafana and Prometheus will be available on `http://localhost:3000` or `:9090`.
+Where all the pertinent information should be entered. Prometheus will be available on `http://localhost:9090`.
+
+Grafana is a `ClusterIP` Service and is not published on a host port at all. As a NodePort `31300` it used to be reachable on every interface of the host with the default `admin`/`admin`, so it now goes through the Ingress instead: `http://grafana.localhost:8080` (see `manifests-monitoring/30-grafana-ingress.yaml`). Without a hosts entry use `kubectl port-forward -n monitoring svc/grafana 3000:80`.
 
 If on Minikube, you can connect via the VM IP address and the NodePort.

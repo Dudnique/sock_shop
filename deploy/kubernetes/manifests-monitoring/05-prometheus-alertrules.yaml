@@ -1,6 +1,3 @@
-# Useful examples on how to configure Prometheus
-# * https://www.weave.works/prometheus-and-kubernetes-monitoring-your-applications/
-# * https://grafana.net/dashboards/162
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,14 +5,144 @@ metadata:
   namespace: monitoring
 data:
   alert.rules: |-
+    # Alerting rules for the Sock Shop stand.
+    #
+    # Design notes:
+    #  * Rules are grouped by WHAT THEY PROTECT (availability / application /
+    #    infrastructure / meta), not by the metric they happen to use, so severity
+    #    and alert routing stay readable.
+    #  * A rule only earns its place here if it CAN actually fire on this stand.
+    #    That is why blackbox probes and kube-state-metrics carry most of the rules:
+    #    both are scraped here (see 04-prometheus-configmap.yaml) and both can be
+    #    triggered on purpose - scale a Deployment to 0, kill a pod, fill a disk.
+    #  * `severity` drives routing in Alertmanager; `namespace`, `deployment` and
+    #    `pod` are carried as labels because the notification text and any later
+    #    log/trace lookup (Loki, Jaeger) need them.
+    #  * `aiops: "true"` marks the alerts an automated first responder should pick
+    #    up. It is deliberately inert today: no Alertmanager receiver matches it yet.
     groups:
-    - name: HighErrorRate
+    - name: availability
+      rules:
+      # blackbox-exporter probes. `probe_success` is 1 when the probe got one of the
+      # valid status codes (see 27-blackbox-exporter-configmap.yaml). The front-end
+      # Ingress carries `prometheus.io/probe: "true"`, which is what creates the
+      # kubernetes-ingresses target these rules read.
+      - alert: ProbeFailed
+        expr: probe_success == 0
+        for: 2m
+        labels:
+          severity: critical
+          namespace: sock-shop
+          aiops: "true"
+        annotations:
+          summary: "Probe failing: {{ $labels.instance }}"
+          description: "blackbox-exporter has not received a 2xx for 2m. A real user cannot reach the site."
+          runbook: "kubectl -n sock-shop get ingress,svc,pods; kubectl -n sock-shop describe ingress front-end"
+      - alert: ProbeSlow
+        expr: probe_duration_seconds > 2
+        for: 5m
+        labels:
+          severity: warning
+          aiops: "true"
+        annotations:
+          summary: "Probe slow: {{ $labels.instance }}"
+          description: "The endpoint answers, but takes longer than 2s for 5m - users feel this."
+    - name: application
       rules:
       - alert: HighErrorRate
+        # Needs traffic to be meaningful: generate it with the load test
+        # (manifests-loadtest, `.\deploy.ps1 -WithLoadtest`).
         expr: rate(request_duration_seconds_count{status_code="500"}[5m]) > 1
         for: 5m
         labels:
-          severity: slack
+          severity: warning
+          aiops: "true"
         annotations:
-          summary: "High HTTP 500 error rates"
-          description: "Rate of HTTP 500 errors per 5 minutes: {{ $value }}"
+          summary: "High HTTP 500 error rate"
+          description: "Rate of HTTP 500 responses over 5m: {{ $value }}/s"
+      - alert: DeploymentReplicasUnavailable
+        # One rule covers both "scaled to 0" and "every pod is crash-looping".
+        expr: kube_deployment_status_replicas_available{namespace="sock-shop"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          namespace: sock-shop
+          deployment: "{{ $labels.deployment }}"
+          aiops: "true"
+        annotations:
+          summary: "deployment/{{ $labels.deployment }} has no available replicas"
+          description: "Nothing has been serving this Deployment for 3m. Check: kubectl -n sock-shop describe deploy/{{ $labels.deployment }}"
+      - alert: PodCrashLooping
+        expr: kube_pod_container_status_waiting_reason{namespace="sock-shop",reason="CrashLoopBackOff"} > 0
+        for: 10m
+        labels:
+          severity: warning
+          namespace: sock-shop
+          pod: "{{ $labels.pod }}"
+          container: "{{ $labels.container }}"
+          aiops: "true"
+        annotations:
+          summary: "pod/{{ $labels.pod }} ({{ $labels.container }}) is in CrashLoopBackOff"
+          description: "The container keeps restarting and backing off for 10m. Last logs: kubectl -n sock-shop logs {{ $labels.pod }} -c {{ $labels.container }} --previous"
+      - alert: PodRestartFlapping
+        expr: increase(kube_pod_container_status_restarts_total{namespace="sock-shop"}[15m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+          namespace: sock-shop
+          pod: "{{ $labels.pod }}"
+          aiops: "true"
+        annotations:
+          summary: "pod/{{ $labels.pod }} restarted {{ $value }} times in 15m"
+          description: "Restarts without CrashLoopBackOff usually mean an OOM kill or a failing liveness probe."
+    - name: infrastructure
+      rules:
+      - alert: NodeNotReady
+        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          node: "{{ $labels.node }}"
+          aiops: "true"
+        annotations:
+          summary: "node/{{ $labels.node }} is NotReady"
+          description: "The kubelet stopped reporting. Workloads on that node are being rescheduled."
+      - alert: NodeDiskPressure
+        expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+        for: 10m
+        labels:
+          severity: warning
+          node: "{{ $labels.node }}"
+        annotations:
+          summary: "node/{{ $labels.node }} reports DiskPressure"
+          description: "The node is low on disk; image garbage collection and pod eviction may follow."
+      - alert: NodeHighCPU
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+          node: "{{ $labels.instance }}"
+        annotations:
+          summary: "node/{{ $labels.instance }} CPU above 90% for 10m"
+          description: "Sustained CPU saturation: pods on this node will get slower."
+      - alert: NodeHighMemory
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 10m
+        labels:
+          severity: warning
+          node: "{{ $labels.instance }}"
+        annotations:
+          summary: "node/{{ $labels.instance }} memory above 90% for 10m"
+          description: "Available memory is nearly exhausted; the OOM killer becomes likely."
+    - name: meta
+      rules:
+      - alert: ScrapeTargetDown
+        # Any target Prometheus cannot scrape. This is the rule that turns a silent
+        # monitoring gap into a visible one.
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
+          description: "A target has been down for 5m; its metrics are missing, so other alerts cannot fire either."

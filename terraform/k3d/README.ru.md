@@ -51,16 +51,35 @@ terraform destroy
 |---|---|---|---|
 | `ingress_http_port` (по умолчанию `8080`) | `80` | load balancer | Sock Shop через Traefik/Ingress |
 | `ingress_https_port` (по умолчанию `8443`) | `443` | load balancer | HTTPS (зарезервирован под TLS) |
-| каждый ключ `exposed_node_ports` | соответствующий NodePort | первая server-нода | тулы: Prometheus `9090`, Grafana `3000`, Alertmanager `9093`, Jaeger UI `16686` |
+| каждый ключ `exposed_node_ports` | соответствующий NodePort | первая server-нода | тулы: Prometheus `9090`, Alertmanager `9093`, Jaeger UI `16686` |
 
 Почему два механизма: приложение маршрутизируется ingress-контроллером (Traefik)
 на единственном load balancer кластера, а тулы публикуются напрямую через свои
 NodePort'ы. NodePort'ы обслуживаются нодами, а не балансировщиком, отсюда
 node-фильтр `server:0`.
 
+Grafana в этом списке **сознательно** больше нет. Раньше это был NodePort `31300`,
+опубликованный как хост-порт `3000`, то есть «доступно на всех интерфейсах машины», и
+отвечал он дефолтным `admin`/`admin`. Теперь её Service — `ClusterIP`, а сама Grafana
+отдаётся через тот же вход Traefik, что и приложение, а различает их заголовок HTTP
+`Host`: `deploy/kubernetes/manifests-monitoring/30-grafana-ingress.yaml`, хост
+`grafana.localhost` (см. `FIXES.md`, раздел 12).
+
 Чтобы опубликовать новый тул, добавь одну строку в `exposed_node_ports`
 в `variables.tf` (или переопредели в `terraform.tfvars`) и сделай `apply` заново.
-Больше ничего менять не нужно.
+Больше ничего менять не нужно — с одной оговоркой, которая стоит времени, если её не
+знать: провайдер k3d **не умеет менять существующий кластер**
+(`Error: Updating clusters is not supported by k3d`), поэтому правка публикуемых портов
+требует явного пересоздания:
+
+```bash
+terraform apply -replace=k3d_cluster.sock_shop
+```
+
+Обычный `terraform apply` на таком изменении падает, а так как тот же apply ещё и
+пересоздаёт сгенерированный kubeconfig (destroy → create), после падения файла
+kubeconfig на машине не остаётся. `deploy.ps1` теперь останавливается на ненулевом коде
+возврата terraform, а не едет дальше.
 
 ## Структура
 

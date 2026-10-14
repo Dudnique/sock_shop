@@ -150,5 +150,10 @@ deploy/secrets.local.ps1
 # Continue.dev agent rules (local tooling, not part of the deployable stand)
 .continue/
 
+# Local interview prep notes: personal, never pushed (design.md/testing.md stay
+# tracked - they document the project, this one documents *me*).
+internal-docs/interview.md
+internal-docs/interview*.local.md
+
 # Editor / backup leftovers
 *.bak
