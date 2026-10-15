@@ -100,6 +100,15 @@ check itself, so `make` - and the purpose-built image it needed - were pure over
 regeneration command is documented in `ci-legacy/README.md` and in
 `deploy/kubernetes/README.md`.
 
+Two small housekeeping changes closed this section. With `ci-legacy/` set aside, the workflow
+file is the only thing CI runs, so its pins became the ones that matter: retiring the node20
+runner had to be done by hand (commit `05cd3bb`), and `.github/dependabot.yml` now opens a
+weekly PR whenever an action, a Terraform provider or one of the two helper images
+(`openapi/`, `healthcheck/`) has a newer version. The scope is deliberately narrow and
+**major** updates are excluded on purpose - a new major of an action or a provider changes
+behaviour and is a decision, not a chore. Nothing is merged automatically: every PR runs this
+same workflow.
+
 ---
 
 ## 5. Alerting stack added (Alertmanager: Telegram + Slack)
@@ -149,6 +158,30 @@ Recorded because they cost real time and are easy to hit again:
    manifest keeps whatever the live object has. The object had to be deleted and
    recreated from scratch (`kubectl delete -f ...` then `apply`) for the removal to
    take effect - see section 8.
+9. **PowerShell 5.1 buffers redirected output - and an empty `*.err.log` proves nothing.**
+   A long run started as `Start-Process ... -RedirectStandardOutput run.log` can sit at
+   **0 bytes** while it is still working, because the host flushes that stream lazily.
+   Measured on 5.1 with a script that prints, sleeps 6 s and prints again: at t=3 s the
+   redirected file held **7 B** while the same output through `Start-Transcript` already
+   held **975 B**; it only reached its final 26 B after the process exited. (The detached
+   child itself survived the exit of the shell that launched it - checked by pid.) Two
+   conclusions: to watch a run live, use `-NoNewWindow` (the child shares the console and
+   lines appear immediately); to keep a log, wrap the run in `Start-Transcript`. And never
+   read a 0-byte `*.err.log` as "it died": `deploy.ps1` writes everything with `Write-Host`,
+   so stderr stays empty on a fully successful run - the real signals are the exit code and
+   the final `SCRIPT-FINISHED-WITHOUT-ERROR` line.
+10. **PowerShell 5.1 does not escape `"` inside an argument passed to a native command.** An
+    otherwise valid `git commit -m '... a "Guard Grafana access" step ...'` reached git
+    mangled and failed with `error: pathspec 'Grafana' did not match any file(s) known to
+    git`. For multi-line messages containing quotes, write the message to a file and use
+    `git commit -F`.
+11. **Personal notes sitting next to published documentation.** `internal-docs/interview.md`
+    accumulated real paths, commands and the credentials used while building the stand - one
+    `git add -A` away from being published. It is in `.gitignore` now, while the project
+    documentation (`internal-docs/design.md`, `internal-docs/testing.md`) stays tracked: the
+    line is drawn between "documents the stand" and "documents the process". A line in
+    `.gitignore` is the cheapest possible guard, and "be careful with `git add -A`" is not a
+    guard at all.
 
 ---
 
