@@ -41,8 +41,10 @@ options, so no credential ever appears in this ConfigMap or in git:
 | `telegram_bot_token` | `telegram_configs.bot_token_file` |
 | `slack_webhook_url`  | `slack_configs.api_url_file` |
 
-`deploy.ps1` creates it idempotently from the environment
-(`TELEGRAM_BOT_TOKEN`, `SLACK_WEBHOOK_URL`) or from `deploy\secrets.local.ps1`.
+`deploy.ps1` creates it idempotently from `deploy\secrets.local.ps1` (git-ignored), and if
+that file is absent it reads the two values back out of the Secret already in the cluster,
+so no token is ever typed as a literal argument; the `TELEGRAM_BOT_TOKEN` and
+`SLACK_WEBHOOK_URL` environment variables are the CI path.
 
 ## Alert rules
 

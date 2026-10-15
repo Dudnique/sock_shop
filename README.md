@@ -75,19 +75,22 @@ To tear the whole stand down again:
 ### Secrets (never committed)
 
 The alerting stack needs two credentials - a Telegram bot token and a Slack
-incoming-webhook URL. They are never committed to git; provide them either as
-environment variables or in a local, git-ignored file that `deploy.ps1` sources
-automatically:
+incoming-webhook URL. They live in `deploy\secrets.local.ps1`, a git-ignored file
+that `deploy.ps1` sources on every run. Create it once and fill it in once - no
+later step asks you for the values again:
 
 ```powershell
-# option A: environment variables
-$env:TELEGRAM_BOT_TOKEN = '...'
-$env:SLACK_WEBHOOK_URL  = 'https://hooks.slack.com/services/...'
-
-# option B: a git-ignored local file
 Copy-Item deploy\secrets.local.ps1.example deploy\secrets.local.ps1
 # then edit deploy\secrets.local.ps1 and fill in the real values
 ```
+
+Environment variables (`TELEGRAM_BOT_TOKEN`, `SLACK_WEBHOOK_URL`) work as well -
+that is the CI path - but nothing here requires you to set them by hand.
+
+If that file is not there at all, that is not an error either: when the stand is already
+up, `deploy.ps1` reads both values back out of the cluster's own `alertmanager-secrets`
+Secret (kubectl hands Secret values over base64-encoded) and re-applies it. Either way
+nothing is pasted anywhere and nothing is typed on a command line.
 
 ## Manual deployment (without the script)
 
@@ -124,7 +127,10 @@ kubectl -n monitoring exec deploy/prometheus-deployment -- `
 #     inside the pod (kubelet does that asynchronously, up to ~2 minutes) - otherwise
 #     the reload would silently re-read the OLD file.
 
-# 6. Alerting - the secret must exist first, then apply the manifests
+# 6. Alerting - the secret must exist first, then apply the manifests.
+#    The values are read from the very file deploy.ps1 uses, so nothing has to be
+#    typed into a command line (where it would stay in your shell history):
+. .\deploy\secrets.local.ps1
 kubectl -n monitoring create secret generic alertmanager-secrets `
     --from-literal=telegram_bot_token=$env:TELEGRAM_BOT_TOKEN `
     --from-literal=slack_webhook_url=$env:SLACK_WEBHOOK_URL `

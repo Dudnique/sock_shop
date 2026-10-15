@@ -503,3 +503,67 @@ code back as data - so "the Secret is not there yet" is an answer, not a crash. 
 probe returns `exit=1, output=''` for an absent Secret without throwing, and a full run on a
 fresh cluster now reaches 6/6.
 
+
+## 13. The alerting Secret: no token is ever typed, and the cluster hands its own back
+
+The stand needs two credentials (a Telegram bot token and a Slack incoming-webhook URL), and
+the first version of the tooling treated them as something a human has to paste into a
+command line. That is wrong twice over: a value typed as an argument stays in the shell
+history, and it demands a secret that the stand may already hold.
+
+Three things changed.
+
+- **The git-ignored file is the source, the environment is the CI fallback.**
+  `deploy\secrets.local.ps1` is sourced on every run, and it is sourced *after* the
+  environment - so it wins, and a shell with a stale exported `TELEGRAM_BOT_TOKEN` cannot
+  silently deploy a token that differs from the file. CI has no such file and passes the two
+  environment variables instead. The README no longer presents
+  `$env:TELEGRAM_BOT_TOKEN = '...'` as the normal path, and the manual step 6 dot-sources
+  that same file instead of asking for the value.
+- **When neither has the values, the cluster supplies them.** The early check used to `throw`
+  before Terraform had even created the cluster, so a re-run (or a fresh clone sitting next
+  to a live stand) died over credentials that were already deployed and did not need to
+  change. Now the missing values are a printed note, and section 6 reads them back out of
+  `alertmanager-secrets` itself - `kubectl` hands Secret values over base64-encoded, so the
+  new `Get-ClusterSecretValue` helper decodes them - and then re-applies the Secret
+  idempotently. If the Secret is missing as well, the `throw` names the one thing to do
+  (create `deploy\secrets.local.ps1` from the `.example` sample) and still never asks anybody
+  to paste a token. Every probe goes through `Invoke-QuietProbe`, for the PowerShell 5.1
+  reason from section 6.9: an absent Secret is an answer, not a crash.
+- **No paste-me placeholders left in the deployment docs.**
+  `examples/alertmanager-secret.example.yaml` used to advertise a
+  `--from-literal=telegram_bot_token='…'` recipe and carried `PASTE_BOT_TOKEN_HERE`; both are
+  gone, and the key is now `REPLACE_ME` next to a note that the file is a shape reference,
+  not a template. `manifests-alerting/README.md` no longer calls the environment variables
+  the primary path.
+
+Verified on the live stand, each run through `Start-Transcript` (the transcript holds the
+script's own notes; the `... unchanged` lines are quoted from the run output, because a
+PowerShell 5.1 transcript does not capture a native command's stdout):
+
+- **without** `deploy\secrets.local.ps1` and without environment variables, against a cluster
+  that already had the Secret: the run prints the note, then
+  `Alerting credentials taken from the cluster Secret - nothing to type`, then
+  `secret/alertmanager-secrets unchanged`, and reaches 6/6 with no `Error` line - the values
+  travelled out of the Secret and back into it, and the exact case that used to abort now
+  completes;
+- **with** the file: 6/6 again and `secret/alertmanager-secrets unchanged`, i.e. the
+  idempotent apply of the real values still works;
+- **with the Secret deleted** and no `deploy\secrets.local.ps1`, but with the two environment
+  variables present (this machine has them set at Windows level), the run recreated the Secret
+  from those variables: `secret/alertmanager-secrets created`, exit code 0 - the branch a CI
+  shell takes;
+- the last branch (no Secret and no credentials anywhere) was not exercised live for exactly
+  that reason: the machine has both variables exported, so the run always found something to
+  deploy. Its `throw` is therefore quoted from the code - it names `deploy\secrets.local.ps1`
+  (created from the `.example` sample) as the one thing to do and still contains no request to
+  paste a token anywhere.
+
+After those runs the Secret is in place again and the stand is intact: both keys are present
+(`telegram_bot_token=64`, `slack_webhook_url=108` base64 characters). The `with the file` run
+reporting `unchanged` is what proves the values in the file and in the Secret are the same.
+
+Checked alongside: `deploy/secrets.local.ps1` is not tracked, is ignored by
+`.gitignore:148`, and has never been committed - the token the stand runs on has never been
+in git.
+

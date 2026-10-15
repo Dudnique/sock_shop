@@ -42,8 +42,11 @@
 | `telegram_bot_token` | `telegram_configs.bot_token_file` |
 | `slack_webhook_url`  | `slack_configs.api_url_file` |
 
-`deploy.ps1` создаёт его идемпотентно из окружения (`TELEGRAM_BOT_TOKEN`,
-`SLACK_WEBHOOK_URL`) либо из `deploy\secrets.local.ps1`.
+`deploy.ps1` создаёт его идемпотентно из `deploy\secrets.local.ps1` (файл в
+`.gitignore`), а если этого файла нет — читает оба значения обратно из уже
+существующего в кластере Secret, поэтому токен никогда не вводится литералом в
+командной строке; переменные окружения `TELEGRAM_BOT_TOKEN` и `SLACK_WEBHOOK_URL` —
+путь для CI.
 
 ## Правила алертов
 

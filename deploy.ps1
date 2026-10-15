@@ -81,14 +81,36 @@ function Invoke-QuietProbe {
     }
 }
 
+# Reads one key of a Kubernetes Secret and decodes it: kubectl hands Secret values
+# over base64-encoded, so its raw output is not usable as-is. This is how a
+# credential is taken from the cluster itself, so a re-run never has to be handed one.
+function Get-ClusterSecretValue {
+    param(
+        [Parameter(Mandatory)][string] $Namespace,
+        [Parameter(Mandatory)][string] $SecretName,
+        [Parameter(Mandatory)][string] $Key
+    )
+    $probe = Invoke-QuietProbe -Arguments @(
+        "-n", $Namespace, "get", "secret", $SecretName, "-o", "jsonpath={.data.$Key}"
+    )
+    if ($probe.ExitCode -ne 0 -or -not $probe.Output) { return $null }
+    return [System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($probe.Output))
+}
+
 # --- Secrets (never in git) -------------------------------------------------
-# Prefer environment variables; also honour a local, git-ignored file so the
-# stand can be brought up with a single command without exporting anything.
+# The values live in a local, git-ignored file - that is the source of truth for
+# anyone working on the stand; CI has no such file and passes the two environment
+# variables instead. The file is sourced LAST on purpose: it wins over the
+# environment, so a half-exported shell cannot silently deploy a stale token.
 $secretsFile = Join-Path $PSScriptRoot "deploy\secrets.local.ps1"
 if (Test-Path $secretsFile) { . $secretsFile }
 
+# Missing credentials are not fatal here: the cluster may already hold the Secret
+# (a re-run, or a fresh clone next to a live stand). Section 6 reads the values back
+# out of that Secret, so nobody is asked to type a token into a command line.
 if (-not $Down -and (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:SLACK_WEBHOOK_URL)) {
-    throw "Alerting secrets missing. Set TELEGRAM_BOT_TOKEN and SLACK_WEBHOOK_URL (env vars) or create deploy\secrets.local.ps1 that sets both."
+    Write-Host "    No alerting credentials in the environment or in $secretsFile - they will be read from the cluster Secret if it exists" -ForegroundColor Yellow
 }
 
 # All terraform calls run inside the module directory. We deliberately avoid
@@ -208,12 +230,41 @@ Write-Host "==> 6/6 Alerting" -ForegroundColor Cyan
 
 # The secret is created BEFORE the manifests: the Alertmanager pod mounts it as
 # a volume, so it must exist or the pod will not start.
-# Created idempotently: render the manifest client-side, then apply it (a plain
-# `kubectl create` would fail on the second run because the secret already exists).
-kubectl -n monitoring create secret generic alertmanager-secrets `
-    --from-literal=telegram_bot_token=$env:TELEGRAM_BOT_TOKEN `
-    --from-literal=slack_webhook_url=$env:SLACK_WEBHOOK_URL `
-    --dry-run=client -o yaml | kubectl apply -f -
+# Where the values come from, in order: the local, git-ignored secrets file (or the
+# CI environment variables), and if neither has them - the cluster itself. The Secret
+# is usually already deployed there, so its keys are read back out of it (see
+# Get-ClusterSecretValue: kubectl returns them base64-encoded) and applied again
+# idempotently - rendered client-side, because a plain `kubectl create` fails on the
+# second run. Nothing is asked of a human and nothing is typed on a command line.
+$alertingSecretExists = (Invoke-QuietProbe -Arguments @(
+    "-n", "monitoring", "get", "secret", "alertmanager-secrets", "-o", "name")).ExitCode -eq 0
+
+if ($alertingSecretExists -and (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:SLACK_WEBHOOK_URL)) {
+    if (-not $env:TELEGRAM_BOT_TOKEN) {
+        $env:TELEGRAM_BOT_TOKEN = Get-ClusterSecretValue -Namespace monitoring `
+            -SecretName alertmanager-secrets -Key telegram_bot_token
+    }
+    if (-not $env:SLACK_WEBHOOK_URL) {
+        $env:SLACK_WEBHOOK_URL = Get-ClusterSecretValue -Namespace monitoring `
+            -SecretName alertmanager-secrets -Key slack_webhook_url
+    }
+    if ($env:TELEGRAM_BOT_TOKEN -and $env:SLACK_WEBHOOK_URL) {
+        Write-Host "    Alerting credentials taken from the cluster Secret - nothing to type"
+    }
+}
+
+if ($env:TELEGRAM_BOT_TOKEN -and $env:SLACK_WEBHOOK_URL) {
+    kubectl -n monitoring create secret generic alertmanager-secrets `
+        --from-literal=telegram_bot_token=$env:TELEGRAM_BOT_TOKEN `
+        --from-literal=slack_webhook_url=$env:SLACK_WEBHOOK_URL `
+        --dry-run=client -o yaml | kubectl apply -f -
+} elseif ($alertingSecretExists) {
+    Write-Host "    alertmanager-secrets is in the cluster but its values are not readable - leaving it untouched"
+} else {
+    throw ("alertmanager-secrets is missing and no credentials are available. " +
+           "Create deploy\secrets.local.ps1 from deploy\secrets.local.ps1.example (it is git-ignored) " +
+           "and put the token and the webhook URL in it - there is no need to type a token on a command line.")
+}
 
 # note: examples/ is a sub-directory, and `kubectl apply -f <dir>` is NOT
 # recursive, so the *.example.yaml files inside it are intentionally ignored.

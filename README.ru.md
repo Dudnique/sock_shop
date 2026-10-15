@@ -77,19 +77,22 @@ kubectl version --client
 ### Секреты (никогда не коммитятся)
 
 Стеку алертинга нужны два креденшела — токен Telegram-бота и URL Slack
-incoming-webhook. В git они не попадают; задай их либо переменными окружения,
-либо в отдельном git-игнорируемом файле, который `deploy.ps1` подхватывает
-автоматически:
+incoming-webhook. Они лежат в `deploy\secrets.local.ps1` — git-игнорируемом файле,
+который `deploy.ps1` подхватывает на каждом прогоне. Создай его один раз и один раз
+заполни: больше ни один шаг не попросит эти значения:
 
 ```powershell
-# вариант A: переменные окружения
-$env:TELEGRAM_BOT_TOKEN = '...'
-$env:SLACK_WEBHOOK_URL  = 'https://hooks.slack.com/services/...'
-
-# вариант B: локальный git-игнорируемый файл
 Copy-Item deploy\secrets.local.ps1.example deploy\secrets.local.ps1
 # затем открой deploy\secrets.local.ps1 и впиши реальные значения
 ```
+
+Переменные окружения `TELEGRAM_BOT_TOKEN` и `SLACK_WEBHOOK_URL` тоже работают — это
+путь для CI, — но задавать их руками здесь ничего не требует.
+
+Если файла нет вовсе — это тоже не ошибка: когда стенд уже поднят, `deploy.ps1` читает
+оба значения обратно из кластерного Secret `alertmanager-secrets` (kubectl отдаёт
+значения Secret в base64) и применяет его заново. Так или иначе, ничего никуда не
+вставляется руками и ничего не вводится в командной строке.
 
 ## Ручное развёртывание (без скрипта)
 
@@ -125,7 +128,10 @@ kubectl -n monitoring exec deploy/prometheus-deployment -- `
 #     .\deploy.ps1 здесь ещё и ждёт, пока файл ConfigMap реально обновится внутри пода
 #     (kubelet делает это асинхронно, до ~2 минут) — иначе reload тихо перечитает СТАРЫЙ файл.
 
-# 6. Алертинг — сначала секрет, потом манифесты
+# 6. Алертинг — сначала секрет, потом манифесты.
+#    Значения читаются из того же файла, что использует deploy.ps1, поэтому в
+#    командную строку ничего вписывать не надо (там оно осталось бы в history):
+. .\deploy\secrets.local.ps1
 kubectl -n monitoring create secret generic alertmanager-secrets `
     --from-literal=telegram_bot_token=$env:TELEGRAM_BOT_TOKEN `
     --from-literal=slack_webhook_url=$env:SLACK_WEBHOOK_URL `
