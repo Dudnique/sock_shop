@@ -264,6 +264,8 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 │       ├── manifests-monitoring/           # Prometheus, Grafana, экспортёры
 │       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
 │       ├── manifests-loadtest/             # опциональный генератор нагрузки (locust)
+│       ├── manifests-policy/               # сетевые политики: default-deny + разрешения по сервисам
+│       ├── autoscaling/                    # HPA v2 для stateless-сервисов (+ legacy/)
 │       ├── complete-demo.yaml              # приложение одним файлом
 │       └── helm-chart/                     # альтернатива: Helm-чарт
 └── terraform/

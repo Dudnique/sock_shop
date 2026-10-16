@@ -567,3 +567,144 @@ Checked alongside: `deploy/secrets.local.ps1` is not tracked, is ignored by
 `.gitignore:148`, and has never been committed - the token the stand runs on has never been
 in git.
 
+
+---
+
+## 14. Autoscaling: eight HPAs that could not scale, and the defect only `TARGETS` could show
+
+`deploy/kubernetes/autoscaling/` had been in the repository since the upstream fork and looked
+finished: eight `*-hsc.yaml` files, valid YAML, believable numbers. Measured state: **not one
+autoscaler was running, and none of them could have.** Four independent defects:
+
+| Defect | How it showed up | Consequence |
+|---|---|---|
+| `apiVersion: autoscaling/v1` | reading the files | no `behavior` at all - v1 cannot express scaling policies, so the controller reacts to every blip: adds a replica, sees the average fall, removes it 15 s later |
+| `scaleTargetRef.apiVersion: apps/v1beta1` | `kubectl describe hpa` | removed in Kubernetes 1.16 - on this 1.35 cluster the HPA cannot resolve its target at all |
+| the directory was applied by nobody | `kubectl get hpa -A` was empty | the repository advertised elasticity the cluster did not have; worse than absent, because it looks done |
+| the HPA named `cart` pointed at `Deployment/cart`, the Deployment is `carts` | `kubectl get hpa` showed `cpu: <unknown>/50%`, forever | an autoscaler that can never fire |
+
+The last row is the reason this section exists: **`kubectl apply` prints `created` for an HPA
+whose target does not exist.** The only proof that an autoscaler works is the `TARGETS` column
+(`cpu: 3%/50%`) or the events in `kubectl describe hpa`; a permanent `<unknown>` is a dead
+autoscaler, not a slow one. Renaming the object to `carts` was not cosmetic - it is what makes
+the target resolve.
+
+**Fix.** All eight files are `autoscaling/v2` with `target: Utilization / averageUtilization:
+50` and an explicit `behavior`; `deploy.ps1` applies the directory and then **waits until an HPA
+reports a CPU metric**, failing the run if it never arrives (the objects exist either way - that
+is exactly the trap being closed). The rationale for the numbers is in `autoscaling/README.md`:
+50% of `requests.cpu` is the only target that means the same thing across pods and nodes (every
+service here requests 100m); `maxReplicas: 5` is a three-node budget decision rather than a round
+number; up 2 pods / 30 s and down 1 pod / 60 s behind a 300 s stabilization window is what stops
+the classic flap. The 2018 stack that shipped next to these files - Heapster, InfluxDB, an old
+Grafana - was moved to `autoscaling/legacy/` with a README saying what replaced it
+(metrics-server), because Heapster was removed from Kubernetes in 1.13 and applied by nobody.
+
+**Verification (live, on this stand).** The honest problem is that locust drives `front-end` to
+~3m of CPU - 3% of its 100m request - so real traffic is nowhere near the 50% target and the
+HPA correctly stays at one replica. Inventing CPU load would prove that the laptop gets hot, not
+that the autoscaler works, so the *request* was narrowed instead (1m, temporary, reverted; the
+shipped manifest keeps 100m):
+
+```
+t=40s    cpu: 300%/50%   replicas: 1   pods: 1
+t=60s    cpu: 200%/50%   replicas: 3   pods: 3      <- New size: 3; reason: cpu resource
+t=80s    cpu: 300%/50%   replicas: 3   pods: 4         utilization (percentage of request)
+t=100s   cpu: 200%/50%   replicas: 4   pods: 4         above target
+```
+
+and the reverse direction, after the request was restored to 100m: `4 -> 2 -> 1` replica, one
+pod per 60 s behind the 300 s window, `cpu: 2%/50%`. Both directions were measured on the same
+HPA with the same traffic and no synthetic pressure. Scale-down is the half people skip, and it
+is the half that decides whether an autoscaler is usable: a controller that never comes back
+down only moves the capacity problem somewhere else.
+
+**What is honestly still missing** (kept in the notes' weak-points section): no
+PodDisruptionBudget, so draining a node can still take every replica of a service at once; no
+VPA and no cluster capacity headroom, so `maxReplicas: 5 x 8 services` is a promise the three
+nodes could not keep; `queue-master` is CPU-scaled although its real signal is queue depth (the
+honest next step is KEDA on RabbitMQ metrics, not a lower CPU target); and there is no node-level
+autoscaling, which on a laptop is a deliberate omission rather than an oversight.
+
+---
+
+## 15. Network policies: the segmentation that was a namespace annotation
+
+`manifests-policy/` was in the same state as the autoscaling directory, and for the same reason:
+**validated by CI, applied by nobody.** Three defects, each of them hidden by the others:
+
+- `netpol-default-deny.yaml` was not a NetworkPolicy at all. It was a `kind: Namespace` object
+  with the pre-1.7 annotation
+  `net.beta.kubernetes.io/network-policy: {"ingress":{"isolation":"DefaultDeny"}}`. Modern
+  clusters ignore that annotation completely, so the file called "default deny" denied nothing.
+- the twelve per-service files carried neither `policyTypes` nor a single `egress` rule. They
+  listed ingress sources and left the rest to defaults, so nothing in the repository said what a
+  pod is allowed to *send*.
+- `session-db` (Redis, `SESSION_REDIS=true` in `09-front-end-dep.yaml`) was covered by no file
+  at all - and that Redis has no password on this stand.
+
+Measured consequence: any pod could reach any other pod, every Mongo/MySQL store included.
+`kubectl get netpol` printed thirteen objects, which is exactly the kind of security that shows
+up in a screenshot and not in a threat model.
+
+**Fix.** The upstream set was deleted rather than kept: NetworkPolicy objects are **additive**
+(Kubernetes unions every rule that selects a pod), so an old permissive rule cannot be "backed
+up" by a new strict one - it only adds holes back. The replacement is 17 objects: a real
+`default-deny` for ingress *and* egress, platform egress that every pod needs (DNS, Jaeger), the
+scrape path for Prometheus, and one file per service naming its callers and its own
+dependencies. Ports are copied from the Service definitions, which is how `catalogue-db:3306`
+(MySQL) is told apart from the three Mongo stores on 27017.
+
+**Verification** - `verify-netpol.ps1` creates throwaway probe pods, reads their verdict and
+deletes them again, so nothing is left behind. 6/6 green:
+
+```
+[OK] default ns -> front-end.sock-shop:80          blocked, rc=1
+[OK] monitoring (Prometheus) -> front-end:80       reachable, rc=0
+[OK] monitoring (Prometheus) -> catalogue/metrics  reachable, rc=0
+[OK] front-end -> carts:80                         reachable (OPEN)
+[OK] front-end -> session-db:6379                  reachable (OPEN)
+[OK] front-end -> user-db:27017                    blocked (ERROR ECONNREFUSED)
+```
+
+The two blocked lanes are the point, and so is the fact that the same `front-end` pod still
+reaches its own dependencies: the policy cuts one lane, not the application. Metrics are the
+third check - a forgotten scrape path shows up as `up == 0` and `ScrapeTargetDown` within a
+minute.
+
+**Traps measured here** (every one of them cost time):
+
+- **DNS is egress.** With `policyTypes: [Egress]` and no DNS rule every service lookup fails
+  with "no such host", which reads as an application bug rather than a firewall.
+- **kubelet probes are not policed on this CNI - and that is a measurement, not an assumption.**
+  The first version of `02-observability-and-probes.yaml` allowed the node network
+  `172.19.0.0/16` "because probes cannot be expressed with a podSelector". The rule was then
+  removed and the namespace watched: every pod stayed `1/1 Ready`, no `Unhealthy` events, zero
+  `up == 0` targets. k3s runs kube-router, which keeps node-originated traffic out of policy
+  evaluation, so the rule was deleted instead of kept "just in case" - an unused `ipBlock` on
+  the node CIDR is a hole with no benefit. On a CNI that does police kubelet traffic (some
+  Calico setups) it must come back; the comment in the file says so.
+- **`namespaceSelector` needs `kubernetes.io/metadata.name`**, the label Kubernetes adds to
+  every namespace since 1.21 - matching on a hand-written label silently selects nothing.
+- **A probe pod carrying a workload's labels joins that workload.** The first version of the
+  verification script ran a pod labelled `name=carts`, and the `carts` HPA counted it as one of
+  its own: `FailedGetResourceMetric ... missing request for cpu in container netpol-check-3`.
+  Labels are identity for everything that selects pods.
+- **k3s REJECTs, it does not drop.** Denied connections come back as `ECONNREFUSED`
+  immediately instead of timing out, so "it failed fast, therefore the policy cannot be there"
+  is the wrong conclusion in the other direction. And `nc` inside busybox hangs on an
+  *established* connection, so its exit code lies; the verdict has to come from a real client -
+  here, `node` inside the existing front-end pod.
+- **PowerShell 5.1 and `\"` inside single quotes**: the escape is a literal backslash, so JSON
+  written that way reaches `kubectl -p` / `curl -d` broken. Payloads go through files
+  (`--patch-file`, `--data-binary`), the same lesson as section 6.10.
+
+**What this does not give you**: NetworkPolicy is L3/L4 only - no HTTP path or method filtering
+and no TLS inspection are possible at this layer; the DNS rule is a legitimate exfiltration
+channel (it is also a required one); and pod configuration hardening (Pod Security Admission,
+RBAC scoping) is a different axis, still open in section 10.
+
+The lesson worth keeping: the control *and* the deployment step were both missing, and either
+one alone would have produced a false sense of security - a policy that is never applied and a
+policy that is applied but wrong look identical in a repository.
+
