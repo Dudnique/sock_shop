@@ -1,0 +1,33 @@
+---
+# shipping: takes a quote request from `orders` and puts work on the queue, so
+# its only egress destination is RabbitMQ. Nothing calls shipping except
+# `orders` - the previous upstream rule said the same, and that is the kind of
+# agreement a policy should preserve rather than "improve" by guessing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shipping
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: shipping
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: orders
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              name: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672

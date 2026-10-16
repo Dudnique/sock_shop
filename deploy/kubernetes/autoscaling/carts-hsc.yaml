@@ -1,0 +1,40 @@
+---
+# HPA v2 for carts (CPU 50% of requests.cpu, 1..5 replicas). Rationale and the
+# verification recipe: README.md in this directory.
+#
+# The name matters: the Deployment in this stand is `carts` (see
+# manifests/01-carts-dep.yaml), NOT `cart`. The upstream HPA said `cart`, so it
+# matched nothing and showed `cpu: <unknown>/50%` forever - an autoscaler that
+# could never fire. Renamed on purpose; `kubectl get hpa` is the proof.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: carts
+  namespace: sock-shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: carts
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

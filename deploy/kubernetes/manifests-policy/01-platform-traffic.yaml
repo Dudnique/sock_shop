@@ -1,0 +1,42 @@
+---
+# Platform traffic that EVERY pod needs, no matter what it does.
+#
+# 1) DNS. This is the classic trap of egress default-deny: without this rule
+#    every `http://carts` lookup fails with "no such host" and it looks like the
+#    application broke, not like a firewall was switched on. Both protocols
+#    matter: a resolver retries over TCP when a UDP answer is truncated, and
+#    Java/Go resolvers do use TCP.
+#
+# 2) Tracing. All sock-shop services POST Zipkin spans to
+#    http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans
+#    (see manifests-jaeger/02-jaeger-svc.yaml), so "talk to Jaeger" is an
+#    egress destination by design - and it lives in another namespace, which is
+#    why a podSelector alone would not be enough here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-and-tracing
+  namespace: sock-shop
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS in kube-system.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Zipkin span collection (Jaeger all-in-one).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: jaeger
+      ports:
+        - protocol: TCP
+          port: 9411

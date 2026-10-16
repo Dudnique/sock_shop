@@ -1,0 +1,61 @@
+---
+# carts and its database, in one file, because a policy is only understandable
+# together with the pair it protects.
+#
+# Two callers, both measured: the UI reads the basket, and `orders` reads it
+# when an order is placed (upstream allows the same two - the old
+# `cart-access` rule named `orders` as well).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: carts
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: carts
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: front-end
+        - podSelector:
+            matchLabels:
+              name: orders
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              name: carts-db
+      ports:
+        - protocol: TCP
+          port: 27017
+---
+# carts-db: one caller, one port. This is the rule that actually protects data,
+# and the reason the annotation that used to live here was not enough: with the
+# old setup any pod (and any future bot) could connect to 27017.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: carts-db
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: carts-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: carts
+      ports:
+        - protocol: TCP
+          port: 27017

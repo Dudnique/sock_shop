@@ -1,0 +1,56 @@
+---
+# catalogue (the product list) and its MySQL database.
+#
+# Read-only path: only the UI asks catalogue for products, and only catalogue
+# touches catalogue-db. Note the port difference from the Mongo databases in
+# this stand (3306 here, 27017 there) - a policy that "looks right" with the
+# wrong port silently breaks the service, which is why every port below came
+# from a Service definition, not from memory.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: catalogue
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: catalogue
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: front-end
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              name: catalogue-db
+      ports:
+        - protocol: TCP
+          port: 3306
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: catalogue-db
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: catalogue-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: catalogue
+      ports:
+        - protocol: TCP
+          port: 3306

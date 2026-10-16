@@ -1,0 +1,26 @@
+---
+# session-db (Redis) was not covered by ANY policy before this rewrite - the
+# upstream set simply forgot it, even though front-end enables it explicitly
+# (`SESSION_REDIS=true`). Redis has no authentication in this stand, so "anyone
+# in the namespace may connect to 6379" was a real hole, not a theoretical one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: session-db
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: session-db
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: front-end
+      ports:
+        - protocol: TCP
+          port: 6379
+  egress: []

@@ -1,0 +1,30 @@
+---
+# The baseline of the namespace: nothing may reach these pods and these pods
+# may reach nothing - until a later policy says otherwise.
+#
+# Why a real NetworkPolicy instead of the old annotation:
+# `net.beta.kubernetes.io/network-policy` (still present in the previous
+# version of this file) was the pre-1.7 way of asking a NetworkPolicy plugin
+# for isolation. Modern clusters ignore that annotation completely, so the old
+# file was a comment rather than a control: the stand looked isolated while
+# every pod could reach every other pod, and the databases were open to all of
+# them. This object is enforced by the CNI itself.
+#
+# Both policy types are listed on purpose:
+#   - `Ingress` stops lateral movement INTO pods;
+#   - `Egress` stops a pod from opening connections OUT (e.g. to the internet).
+# Ingress-only would satisfy the demo and leave the more interesting hole - the
+# one a compromised pod, or a future LLM-driven bot, would actually use.
+#
+# `podSelector: {}` selects every pod of the namespace; with the two policy
+# types listed and no rules, everything is denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: sock-shop
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

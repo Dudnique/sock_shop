@@ -1,0 +1,68 @@
+---
+# front-end is the only workload users reach directly, so it is also the only
+# one with callers from outside this namespace.
+#
+# Ingress:
+#   - kube-system -> 8079: Traefik serves the Ingress for http://localhost:8080
+#     (manifests/29-front-end-ingress.yaml) and lives in kube-system.
+#   - loadtest    -> 8079: the optional load generator hammers
+#     http://front-end.sock-shop.svc.cluster.local (manifests-loadtest).
+# Egress: exactly the services this UI is made of. `payment` is deliberately
+# absent - the checkout path goes through `orders`, and writing a rule for a
+# caller that was never observed would make the policy look stricter than it
+# is. If a denial shows up in the front-end log, the rule gets added next to
+# that evidence.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: front-end
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: front-end
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8079
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: loadtest
+      ports:
+        - protocol: TCP
+          port: 8079
+  egress:
+    # Several podSelectors inside one `to` are OR-ed - the syntax that makes a
+    # policy readable instead of one rule per backend.
+    - to:
+        - podSelector:
+            matchLabels:
+              name: carts
+        - podSelector:
+            matchLabels:
+              name: catalogue
+        - podSelector:
+            matchLabels:
+              name: orders
+        - podSelector:
+            matchLabels:
+              name: user
+      ports:
+        - protocol: TCP
+          port: 80
+    # Session store (`SESSION_REDIS=true` in 09-front-end-dep.yaml).
+    - to:
+        - podSelector:
+            matchLabels:
+              name: session-db
+      ports:
+        - protocol: TCP
+          port: 6379

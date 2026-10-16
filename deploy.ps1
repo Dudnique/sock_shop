@@ -129,7 +129,7 @@ try {
     }
 
     # --- 1. Cluster (Terraform) ---------------------------------------------
-    Write-Host "==> 1/6 Cluster via Terraform" -ForegroundColor Cyan
+    Write-Host "==> 1/8 Cluster via Terraform" -ForegroundColor Cyan
     terraform init -input=false
     if ($LASTEXITCODE -ne 0) {
         throw "terraform init failed (exit $LASTEXITCODE). Fix the configuration and re-run."
@@ -168,22 +168,56 @@ Write-Host "    Waiting for nodes to be ready..." -ForegroundColor Cyan
 kubectl wait --for=condition=Ready node --all --timeout=180s | Out-Null
 
 # --- 2. Application ---------------------------------------------------------
-Write-Host "==> 2/6 Application (sock-shop)" -ForegroundColor Cyan
+Write-Host "==> 2/8 Application (sock-shop)" -ForegroundColor Cyan
 kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests")
 kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
 
-# --- 3. Logging (Loki + Promtail) -------------------------------------------
+# --- 3. Network policies ----------------------------------------------------
+# Before the monitoring stack on purpose: the policies open the scrape path for
+# Prometheus by namespace, and a policy applied after the first scrape would
+# leave the monitoring stack with dead targets until the next rollout.
+# `kubectl apply -f <dir>` does not recurse, so nothing under legacy/ is ever
+# applied by accident. Verification is a separate, explicit step:
+#   .\deploy\kubernetes\manifests-policy\verify-netpol.ps1
+Write-Host "==> 3/8 Network policies (manifests-policy)" -ForegroundColor Cyan
+kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-policy")
+
+# --- 4. Autoscaling (HPA v2) ------------------------------------------------
+# Two prerequisites, and both are worth stating because the stand used to have
+# neither in effect: `requests.cpu` on the target pods (the HPA scales on a
+# PERCENTAGE of the request) and metrics-server (the usage comes from the
+# metrics.k8s.io API). k3s ships metrics-server, so this is one line here - and
+# the wait below turns a missing metrics-server into a clear failure instead of
+# leaving eight dead autoscalers behind, which is how this repository looked
+# before: 8 manifests, 0 HPAs in the cluster.
+Write-Host "==> 4/8 Autoscaling (HPA v2)" -ForegroundColor Cyan
+kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\autoscaling")
+
+$hpaDeadline = (Get-Date).AddMinutes(2)
+$hpaMetricsReady = $false
+while ((Get-Date) -lt $hpaDeadline) {
+    $hpaMetrics = kubectl -n sock-shop get hpa `
+        -o jsonpath='{range .items[*]}{.status.currentMetrics}{"\n"}{end}' 2>$null
+    if ($hpaMetrics -match 'averageUtilization') { $hpaMetricsReady = $true; break }
+    Start-Sleep -Seconds 5
+}
+if (-not $hpaMetricsReady) {
+    throw "No HPA reported CPU metrics within 2 minutes. HPA needs metrics-server (k3s ships it) and requests.cpu on the target pods; without both, the objects exist but never scale."
+}
+Write-Host "    HPA metrics are flowing (metrics-server reachable)." -ForegroundColor Green
+
+# --- 5. Logging (Loki + Promtail) -------------------------------------------
 # Applied after the application on purpose: Promtail tails the log files of the
 # pods that are already running, so Loki starts collecting immediately.
-Write-Host "==> 3/6 Logging (Loki + Promtail)" -ForegroundColor Cyan
+Write-Host "==> 5/8 Logging (Loki + Promtail)" -ForegroundColor Cyan
 kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-logging")
 
-# --- 4. Tracing (Jaeger) ----------------------------------------------------
-Write-Host "==> 4/6 Tracing (Jaeger)" -ForegroundColor Cyan
+# --- 6. Tracing (Jaeger) ----------------------------------------------------
+Write-Host "==> 6/8 Tracing (Jaeger)" -ForegroundColor Cyan
 kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-jaeger")
 
-# --- 5. Monitoring ----------------------------------------------------------
-Write-Host "==> 5/6 Monitoring" -ForegroundColor Cyan
+# --- 7. Monitoring ----------------------------------------------------------
+Write-Host "==> 7/8 Monitoring" -ForegroundColor Cyan
 
 # The dashboard/datasource import is a one-shot Job and a Job spec is immutable,
 # so a plain re-apply of an existing Job fails. Delete the finished Job first:
@@ -225,8 +259,8 @@ kubectl -n monitoring create secret generic grafana-admin `
 
 kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-monitoring")
 
-# --- 6. Alerting ------------------------------------------------------------
-Write-Host "==> 6/6 Alerting" -ForegroundColor Cyan
+# --- 8. Alerting ------------------------------------------------------------
+Write-Host "==> 8/8 Alerting" -ForegroundColor Cyan
 
 # The secret is created BEFORE the manifests: the Alertmanager pod mounts it as
 # a volume, so it must exist or the pod will not start.
@@ -345,5 +379,10 @@ Write-Host  "              kubectl port-forward -n monitoring svc/grafana 3000:8
 if ($grafanaPasswordGenerated) {
     Write-Host ("    Grafana admin password generated in this run: {0}" -f $grafanaPassword) -ForegroundColor Yellow
 } else {
-    Write-Host  "    Grafana admin password: GRAFANA_ADMIN_PASSWORD, or the existing grafana-admin Secret"
+    # Printed on purpose. The value already lives in the grafana-admin Secret and
+    # this is a single-user training stand - and "the password is in the Secret,
+    # look it up" turned out to be exactly the step people get stuck on (the
+    # Secret is base64, the Service is ClusterIP, and the UI needs a hosts entry).
+    # Set GRAFANA_ADMIN_PASSWORD to pick your own value instead.
+    Write-Host ("    Grafana admin password (from the existing grafana-admin Secret): {0}" -f $grafanaPassword) -ForegroundColor Yellow
 }

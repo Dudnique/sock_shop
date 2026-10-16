@@ -1,0 +1,43 @@
+---
+# Two callers that are NOT a pod of this namespace, and therefore cannot be
+# expressed with a plain `podSelector` rule.
+#
+# 1) Prometheus (namespace `monitoring`) scrapes every sock-shop pod directly
+#    by pod IP - see the targets in 04-prometheus-configmap.yaml
+#    (`http://10.42.x.y:80/metrics`, `:8079/metrics`, `:9090/metrics`).
+#    Without this rule the monitoring stack loses all application metrics.
+#
+# The node network is deliberately NOT allowed here, and that came out of a
+# measurement, not out of a habit:
+#   * the first version of this file allowed `172.19.0.0/16` (this stand's node
+#     network) "because kubelet probes cannot be matched by a podSelector";
+#   * the rule was then removed and the namespace watched: every pod stayed
+#     `1/1 Ready` for minutes, `kubectl get events --field-selector
+#     reason=Unhealthy` stayed empty, and `up == 0` targets stayed at zero.
+# k3s runs kube-router, which keeps node-originated traffic out of policy
+# evaluation, so that ipBlock rule would have been a permanent hole bought with
+# nothing. If this namespace is ever moved to a CNI that DOES police kubelet
+# probes (some Calico setups do), the rule has to come back - it is the three
+# lines this comment replaced.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-and-probes
+  namespace: sock-shop
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Prometheus scraping: the application metrics endpoints of this stand.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8079
+        - protocol: TCP
+          port: 9090

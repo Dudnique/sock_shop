@@ -40,22 +40,31 @@ kubectl version --client
 .\deploy.ps1
 ```
 
-Скрипт — тонкий оркестратор, он делает **шесть** шагов плюс необязательный седьмой:
+Скрипт — тонкий оркестратор, он делает **восемь** шагов плюс необязательный девятый:
 
 1. поднимает кластер k3d через **Terraform** (`terraform/k3d`) — единственный
    источник правды про инфраструктуру;
 2. применяет манифесты приложения (`deploy/kubernetes/manifests`);
-3. применяет стек логирования (`deploy/kubernetes/manifests-logging` — Loki + Promtail);
-4. применяет стек трейсинга (`deploy/kubernetes/manifests-jaeger`);
-5. применяет стек мониторинга (`deploy/kubernetes/manifests-monitoring`), а затем делает
+3. применяет **сетевые политики** (`deploy/kubernetes/manifests-policy`): настоящий
+   default-deny и на вход, и на выход, плюс по одному разрешению на сервис. До этого
+   шага каталог проверялся в CI и не применялся никем, а его «default deny» был
+   аннотацией namespace из версий до 1.7, которую современные кластеры игнорируют —
+   то есть любой под мог достучаться до любого, включая все базы;
+4. применяет **автоскейлеры** (`deploy/kubernetes/autoscaling`, `autoscaling/v2`) и
+   затем ждёт, пока хотя бы один HPA реально начнёт отдавать метрики CPU. Объекты
+   существуют в любом случае, но без metrics-server (идёт в комплекте k3s) и
+   `requests.cpu` они никогда не сработают — ровно в таком состоянии репозиторий и был;
+5. применяет стек логирования (`deploy/kubernetes/manifests-logging` — Loki + Promtail);
+6. применяет стек трейсинга (`deploy/kubernetes/manifests-jaeger`);
+7. применяет стек мониторинга (`deploy/kubernetes/manifests-monitoring`), а затем делает
    то, чего не умеет обычный `kubectl apply`: ждёт, пока ConfigMap с правилами алертов
    действительно обновится **внутри работающего пода**, проверяет смонтированный файл
    правил через `promtool check rules` и только после этого вызывает `POST /-/reload`.
    Prometheus перечитывает правила только при старте, а битый файл правил для него
    **не фатален** — он пишет ошибку в лог и продолжает работать **без этих алертов**.
    Тихая дыра в мониторинге хуже упавшего деплоя, поэтому невалидный файл прерывает скрипт;
-6. применяет стек алертинга (`deploy/kubernetes/manifests-alerting`) и его секреты;
-7. *(необязательно, `-WithLoadtest`)* применяет генератор нагрузки
+8. применяет стек алертинга (`deploy/kubernetes/manifests-alerting`) и его секреты;
+9. *(необязательно, `-WithLoadtest`)* применяет генератор нагрузки
    (`deploy/kubernetes/manifests-loadtest`).
 
 После этого магазин откроется по адресу **http://localhost:8080**.
@@ -108,16 +117,26 @@ cd ..\..
 kubectl apply -f deploy\kubernetes\manifests
 kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
 
-# 3. Логирование — Loki (хранилище) + Promtail (сборщик)
+# 3. Сетевые политики - default-deny (и на вход, и на выход) плюс по одному
+#    разрешению на сервис. Доказательство, что они работают:
+#      .\deploy\kubernetes\manifests-policy\verify-netpol.ps1
+kubectl apply -f deploy\kubernetes\manifests-policy
+
+# 4. Автоскейлеры (HPA v2). Нужны metrics-server (идёт в комплекте k3s) и requests.cpu;
+#    в колонке TARGETS должен быть процент — `<unknown>` означает, что автоскейлер мёртв:
+kubectl apply -f deploy\kubernetes\autoscaling
+kubectl -n sock-shop get hpa
+
+# 5. Логирование — Loki (хранилище) + Promtail (сборщик)
 kubectl apply -f deploy\kubernetes\manifests-logging
 
-# 4. Трейсинг — Jaeger
+# 6. Трейсинг — Jaeger
 kubectl apply -f deploy\kubernetes\manifests-jaeger
 
-# 5. Мониторинг
+# 7. Мониторинг
 kubectl apply -f deploy\kubernetes\manifests-monitoring
 
-# 5b. Prometheus перечитывает файлы правил только при старте, а битый файл правил
+# 7b. Prometheus перечитывает файлы правил только при старте, а битый файл правил
 #     не фатален: он пишет ошибку и продолжает работать БЕЗ этих алертов. Поэтому
 #     сначала валидируем смонтированный файл, потом перечитываем без рестарта
 #     (рестарт уничтожил бы TSDB, а он на emptyDir):
@@ -128,7 +147,7 @@ kubectl -n monitoring exec deploy/prometheus-deployment -- `
 #     .\deploy.ps1 здесь ещё и ждёт, пока файл ConfigMap реально обновится внутри пода
 #     (kubelet делает это асинхронно, до ~2 минут) — иначе reload тихо перечитает СТАРЫЙ файл.
 
-# 6. Алертинг — сначала секрет, потом манифесты.
+# 8. Алертинг — сначала секрет, потом манифесты.
 #    Значения читаются из того же файла, что использует deploy.ps1, поэтому в
 #    командную строку ничего вписывать не надо (там оно осталось бы в history):
 . .\deploy\secrets.local.ps1
@@ -138,7 +157,7 @@ kubectl -n monitoring create secret generic alertmanager-secrets `
     --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f deploy\kubernetes\manifests-alerting
 
-# 7. (необязательно) генератор нагрузки — без трафика дашборды пустые,
+# 9. (необязательно) генератор нагрузки — без трафика дашборды пустые,
 #    а правилам алертов не на чем срабатывать
 kubectl apply -f deploy\kubernetes\manifests-loadtest
 ```
@@ -188,6 +207,22 @@ kubectl port-forward -n monitoring svc/grafana 3000:80   # http://localhost:3000
 в своей базе — и из него читают данные и Deployment, и Job импорта. Чтобы задать
 свой пароль, выставь `GRAFANA_ADMIN_PASSWORD`; иначе случайный будет сгенерирован и
 напечатан в конце развёртывания.
+
+**Как войти.** Логин `admin` (или `GRAFANA_ADMIN_USER`), а пароль всегда можно
+прочитать из Secret — тем же приёмом, что использует `deploy.ps1`; он же печатает
+его в итоговой сводке:
+
+```powershell
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' |
+  ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) }
+```
+
+Анонимный вход выключен **намеренно** (`GF_AUTH_ANONYMOUS_ENABLED=false` в
+`21-grafana-dep.yaml`): раньше Grafana была `NodePort` без аутентификации с парой
+`admin`/`admin`, доступная на всех интерфейсах хоста. Если на локальном стенде
+хочется открывать UI без логина — поставь эту переменную в `true`, а
+`GF_AUTH_ANONYMOUS_ORG_ROLE` в `Viewer`, тогда анонимные посетители останутся
+только для чтения, а правка дашбордов по-прежнему требует входа администратора.
 
 ### Мониторинг и алертинг одним взглядом
 

@@ -1,16 +1,43 @@
 ---
-apiVersion: autoscaling/v1
+# HPA v2 for front-end. See README.md in this directory: why autoscaling/v2
+# (and not the 2018 autoscaling/v1), why maxReplicas is 5, and how to verify
+# scaling without guessing.
+apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: front-end
   namespace: sock-shop
 spec:
+  # apps/v1beta1 was removed in k8s 1.16 - with the old value this HPA could
+  # not resolve its target on our 1.35 cluster.
   scaleTargetRef:
-    apiVersion: apps/v1beta1
+    apiVersion: apps/v1
     kind: Deployment
     name: front-end
-
   minReplicas: 1
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 50
-    
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        # Percentage of `requests.cpu` (100m), i.e. replicas are added from
+        # ~50m of real CPU usage - reachable with `.\deploy.ps1 -WithLoadtest`.
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      # Slow on the way down on purpose: without it the controller removes a
+      # replica 15s after a blip and adds it back, which reads as "flapping".
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+

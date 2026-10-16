@@ -154,6 +154,7 @@ deploy/secrets.local.ps1
 # tracked - they document the project, this one documents *me*).
 internal-docs/interview.md
 internal-docs/interview*.local.md
+internal-docs/plan*.local.md
 
 # Editor / backup leftovers
 *.bak

@@ -1,0 +1,27 @@
+---
+# payment: a deliberately small service. It is called by `orders` during
+# checkout and talks to nothing itself - which is worth writing down, because
+# "no egress" is a fact an auditor likes to see stated rather than assumed.
+# DNS and span collection still work: those rules live in 01-platform-traffic
+# and select every pod of the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: payment
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: payment
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: orders
+      ports:
+        - protocol: TCP
+          port: 80
+  egress: []

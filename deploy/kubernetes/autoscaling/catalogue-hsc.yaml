@@ -1,16 +1,36 @@
 ---
-apiVersion: autoscaling/v1
+# HPA v2 for catalogue (CPU 50% of requests.cpu, 1..5 replicas). Rationale and
+# the verification recipe: README.md in this directory.
+apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: catalogue
   namespace: sock-shop
 spec:
   scaleTargetRef:
-    apiVersion: apps/v1beta1
+    apiVersion: apps/v1
     kind: Deployment
     name: catalogue
-
   minReplicas: 1
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 50
-    
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+

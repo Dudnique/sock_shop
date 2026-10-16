@@ -1,13 +1,19 @@
 ---
+# rabbitmq: the message bus. Two producers/consumers may reach 5672, and the
+# exporter port 9090 is scraped by Prometheus (allowed namespace-wide in
+# 02-observability-and-probes.yaml, so it is not repeated here).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: rabbitmq-access
+  name: rabbitmq
   namespace: sock-shop
 spec:
   podSelector:
     matchLabels:
       name: rabbitmq
+  policyTypes:
+    - Ingress
+    - Egress
   ingress:
     - from:
         - podSelector:
@@ -19,4 +25,4 @@ spec:
       ports:
         - protocol: TCP
           port: 5672
-
+  egress: []

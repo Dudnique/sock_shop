@@ -1,0 +1,32 @@
+---
+# queue-master: an AMQP consumer, not an API. Nobody calls it (only Prometheus
+# scrapes its /metrics, which 02-observability-and-probes.yaml allows), and its
+# own only destination is RabbitMQ.
+#
+# A note on honesty: queue-master is the one component whose dependency is not
+# visible from the manifests - it consumes the order queue and may need to call
+# `orders` back. The upstream policy set did not mention it at all, so instead
+# of inventing a rule the behaviour is verified: the order flow is exercised
+# after the policies are applied and the queue-master log is read. If a denial
+# appears there, the rule is added together with that evidence.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: queue-master
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: queue-master
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              name: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672

@@ -1,0 +1,56 @@
+---
+# user (accounts, login, addresses) and its database.
+#
+# Two callers: the UI (registration and login) and `orders`, which needs the
+# customer record during checkout.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: user
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: user
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: front-end
+        - podSelector:
+            matchLabels:
+              name: orders
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              name: user-db
+      ports:
+        - protocol: TCP
+          port: 27017
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: user-db
+  namespace: sock-shop
+spec:
+  podSelector:
+    matchLabels:
+      name: user-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              name: user
+      ports:
+        - protocol: TCP
+          port: 27017

@@ -39,22 +39,31 @@ kubectl version --client
 .\deploy.ps1
 ```
 
-The script is a thin orchestrator and does **six** things, plus an optional seventh:
+The script is a thin orchestrator and does **eight** things, plus an optional ninth:
 
 1. provisions the k3d cluster with **Terraform** (`terraform/k3d`) - the single
    source of truth for the infrastructure;
 2. applies the application manifests (`deploy/kubernetes/manifests`);
-3. applies the logging stack (`deploy/kubernetes/manifests-logging` - Loki + Promtail);
-4. applies the tracing stack (`deploy/kubernetes/manifests-jaeger`);
-5. applies the monitoring stack (`deploy/kubernetes/manifests-monitoring`) and then does
+3. applies the **network policies** (`deploy/kubernetes/manifests-policy`): a real
+   default-deny on both ingress and egress, plus one allow rule per service. Before
+   this step the directory was validated by CI and applied by nobody, and its
+   "default deny" was a pre-1.7 namespace annotation that modern clusters ignore -
+   so every pod could reach every other pod, all databases included;
+4. applies the **autoscalers** (`deploy/kubernetes/autoscaling`, `autoscaling/v2`)
+   and then waits until an HPA actually reports CPU metrics. The objects exist
+   either way, but without metrics-server (k3s ships it) and `requests.cpu` they
+   would never scale - which is exactly the state this repository was in;
+5. applies the logging stack (`deploy/kubernetes/manifests-logging` - Loki + Promtail);
+6. applies the tracing stack (`deploy/kubernetes/manifests-jaeger`);
+7. applies the monitoring stack (`deploy/kubernetes/manifests-monitoring`) and then does
    three extra things that plain `kubectl apply` cannot: it waits until the alert-rule
    ConfigMap has actually been refreshed **inside the running pod**, validates the mounted
    rule file with `promtool check rules`, and only then triggers `POST /-/reload`.
    Prometheus re-reads rule files at startup only, and a malformed rule file is **not**
    fatal - it logs an error and keeps serving requests **without those alerts**. A silent
    monitoring gap is worse than a failed deployment, so an invalid file aborts the script;
-6. applies the alerting stack (`deploy/kubernetes/manifests-alerting`) plus its secrets;
-7. *(optional, `-WithLoadtest`)* applies the load generator (`deploy/kubernetes/manifests-loadtest`).
+8. applies the alerting stack (`deploy/kubernetes/manifests-alerting`) plus its secrets;
+9. *(optional, `-WithLoadtest`)* applies the load generator (`deploy/kubernetes/manifests-loadtest`).
 
 The shop then opens at **http://localhost:8080**.
 
@@ -106,16 +115,26 @@ cd ..\..
 kubectl apply -f deploy\kubernetes\manifests
 kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
 
-# 3. Logging - Loki (store) + Promtail (collector)
+# 3. Network policies - default-deny (ingress AND egress) plus one allow rule per
+#    service. Proof that they do something:
+#      .\deploy\kubernetes\manifests-policy\verify-netpol.ps1
+kubectl apply -f deploy\kubernetes\manifests-policy
+
+# 4. Autoscalers (HPA v2). They need metrics-server (k3s ships it) and requests.cpu;
+#    `TARGETS` must show a percentage - `<unknown>` means the autoscaler is dead:
+kubectl apply -f deploy\kubernetes\autoscaling
+kubectl -n sock-shop get hpa
+
+# 5. Logging - Loki (store) + Promtail (collector)
 kubectl apply -f deploy\kubernetes\manifests-logging
 
-# 4. Tracing - Jaeger
+# 6. Tracing - Jaeger
 kubectl apply -f deploy\kubernetes\manifests-jaeger
 
-# 5. Monitoring
+# 7. Monitoring
 kubectl apply -f deploy\kubernetes\manifests-monitoring
 
-# 5b. Prometheus re-reads rule files at startup only, and a malformed rule file is
+# 7b. Prometheus re-reads rule files at startup only, and a malformed rule file is
 #     not fatal: it logs an error and keeps running WITHOUT those alerts. So validate
 #     the mounted file first, then reload without a restart (a restart would wipe the
 #     TSDB, which lives on emptyDir):
@@ -127,7 +146,7 @@ kubectl -n monitoring exec deploy/prometheus-deployment -- `
 #     inside the pod (kubelet does that asynchronously, up to ~2 minutes) - otherwise
 #     the reload would silently re-read the OLD file.
 
-# 6. Alerting - the secret must exist first, then apply the manifests.
+# 8. Alerting - the secret must exist first, then apply the manifests.
 #    The values are read from the very file deploy.ps1 uses, so nothing has to be
 #    typed into a command line (where it would stay in your shell history):
 . .\deploy\secrets.local.ps1
@@ -137,7 +156,7 @@ kubectl -n monitoring create secret generic alertmanager-secrets `
     --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f deploy\kubernetes\manifests-alerting
 
-# 7. (optional) load generator - without traffic the dashboards stay empty and the
+# 9. (optional) load generator - without traffic the dashboards stay empty and the
 #    alert rules have nothing to fire on
 kubectl apply -f deploy\kubernetes\manifests-loadtest
 ```
@@ -188,6 +207,22 @@ password in its own database - and both the Deployment and the import Job read
 the credentials from it. Set `GRAFANA_ADMIN_PASSWORD` to choose your own value;
 otherwise a random one is generated and printed at the end of the deploy.
 
+**Logging in.** User `admin` (or `GRAFANA_ADMIN_USER`); the password can always be
+read back out of the Secret - the same trick `deploy.ps1` uses, and it is printed
+in the deploy summary as well:
+
+```powershell
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' |
+  ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) }
+```
+
+Anonymous access is off **on purpose** (`GF_AUTH_ANONYMOUS_ENABLED=false` in
+`21-grafana-dep.yaml`): Grafana used to be an unauthenticated `NodePort` with
+`admin`/`admin` reachable on every interface of the host. If you want the UI to
+open without a login on this local stand, flip that variable to `true` and set
+`GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer` so anonymous visitors stay read-only while the
+admin login keeps guarding edits.
+
 ### Monitoring and alerting at a glance
 
 | What | Where | Notes |
@@ -228,6 +263,8 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 │       ├── manifests-monitoring/           # Prometheus, Grafana, exporters
 │       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
 │       ├── manifests-loadtest/             # optional locust load generator
+│       ├── manifests-policy/               # NetworkPolicy: default-deny + per-service allows
+│       ├── autoscaling/                    # HPA v2 for the stateless services (+ legacy/)
 │       ├── complete-demo.yaml              # application in one file
 │       └── helm-chart/                     # alternative: Helm chart
 └── terraform/
