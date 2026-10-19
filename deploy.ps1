@@ -9,6 +9,8 @@
 #   5. kubectl deploys the monitoring stack   (manifests-monitoring).
 #   6. kubectl deploys the alerting stack     (manifests-alerting) + secrets.
 #   7. (optional, -WithLoadtest) the load generator (manifests-loadtest).
+#   8. (optional, -WithAIOps) the AIOps triage bot (manifests-aiops): the image
+#      is built here, imported into the k3d node and the manifests applied.
 #   It prints the resulting URLs.
 #
 # The cluster is deliberately NOT created with `k3d cluster create` here: that
@@ -18,6 +20,10 @@
 # Slack incoming-webhook URL. They are NEVER committed. Provide them either as
 # environment variables (TELEGRAM_BOT_TOKEN, SLACK_WEBHOOK_URL) or in a local,
 # git-ignored file: deploy\secrets.local.ps1
+# The AIOps bot (only with -WithAIOps) takes an optional third credential, the
+# DeepSeek API key (DEEPSEEK_API_KEY), from the environment or from that same
+# file. It is optional on purpose: without it the bot still deploys on the
+# rules-only path and every card says which tier answered.
 # The monitoring stack needs one more: the Grafana admin password. If
 # GRAFANA_ADMIN_PASSWORD is not set the script generates a random one and reuses
 # it on later runs (see the monitoring section).
@@ -30,6 +36,7 @@
 #
 # Usage:   .\deploy.ps1               # bring the stand up
 #          .\deploy.ps1 -WithLoadtest # ...and start the load generator
+#          .\deploy.ps1 -WithAIOps    # ...and deploy the AIOps triage bot
 #          .\deploy.ps1 -Down         # tear it down
 # ---------------------------------------------------------------------------
 [CmdletBinding()]
@@ -39,7 +46,14 @@ param(
     # Optional: also deploy the locust load generator (manifests-loadtest).
     # Without traffic the dashboards stay empty and the alert rules have
     # nothing to fire on, so this is what makes the stand "alive" for a demo.
-    [switch]$WithLoadtest
+    [switch]$WithLoadtest,
+    # Optional: also deploy the AIOps triage bot (manifests-aiops): build the
+    # image, import it into the k3d node, apply the manifests and wait for it to
+    # become Ready. Nothing happens without this switch, so the stand is
+    # unchanged for anyone who only wants the application stack.
+    # A DEEPSEEK_API_KEY in the environment or in deploy\secrets.local.ps1 is
+    # used if present; without it the bot comes up on the rules-only path.
+    [switch]$WithAIOps
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,13 +79,25 @@ foreach ($tool in @("terraform", "docker", "kubectl")) {
 # through this helper: stderr is dropped, stdout is returned, and the exit code
 # is handed to the caller instead of throwing.
 function Invoke-QuietProbe {
-    param([Parameter(Mandatory)][string[]] $Arguments)
+    param(
+        [Parameter(Mandatory)][string[]] $Arguments,
+        # The probes below are all kubectl, but `k3d image import` needs the same
+        # stderr protection: the helper used to hard-code `kubectl`, so the AIOps
+        # step ran `kubectl image import` and failed with exit 1 on every run.
+        [string] $Command = "kubectl",
+        # kubectl probes are only interested in stdout, so stderr lines are
+        # dropped. k3d reports the actual reason on stderr, so the AIOps caller
+        # keeps it - otherwise the failure is an empty string.
+        [switch] $KeepStderr
+    )
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $stdout = & kubectl @Arguments 2>&1 |
-            Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }
+        $raw = & $Command @Arguments 2>&1
         $exitCode = $LASTEXITCODE
+        $stdout = $raw | Where-Object {
+            $KeepStderr -or $_ -isnot [System.Management.Automation.ErrorRecord]
+        }
     } finally {
         $ErrorActionPreference = $previousPreference
     }
@@ -126,6 +152,45 @@ try {
             throw "terraform destroy failed (exit $LASTEXITCODE)."
         }
         return
+    }
+
+    # --- 0. Docker engine preflight -----------------------------------------
+    # The stand's most confusing failure is not a terraform error: it is a Docker
+    # Desktop VM that came back from an unclean shutdown with all four k3d
+    # containers starting at once. In that state `docker` and `kubectl` both hang
+    # (or answer 500 on the named pipe) and terraform fails for a reason that
+    # names none of it - which is exactly how a half-hour went missing once.
+    # Ask the engine once, with a deadline, then name the recovery command.
+    # Full analysis: FIXES.md, section 17.
+    $engineJob = Start-Job -ScriptBlock { docker info --format "{{.ServerVersion}}|{{.MemTotal}}" }
+    try {
+        $engineAnswered = [bool](Wait-Job $engineJob -Timeout 15)
+        $engineOutput = if ($engineAnswered) {
+            ((Receive-Job $engineJob 2>&1 | ForEach-Object { "$_" }) -join "`n").Trim()
+        } else { "" }
+    } finally {
+        Remove-Job $engineJob -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $engineAnswered) {
+        throw ("The Docker engine did not answer within 15 s, so nothing was deployed: the " +
+               "containers may still be listed, but the VM behind them is not serving. Recover with " +
+               "'wsl --shutdown', start Docker Desktop, then '.\\deploy.ps1 -Down' and '.\\deploy.ps1'. " +
+               "'deploy\\diagnose-stand.ps1' says which of the three failures it is (FIXES.md, section 17).")
+    }
+    if ($engineOutput -match '(\d+\.\d+[^\|]*)\|(\d+)') {
+        $engineVersion = $matches[1].Trim()
+        $vmMemoryGb = [math]::Round([int64]$matches[2] / 1GB, 1)
+        Write-Host "    Docker engine $engineVersion, VM memory $vmMemoryGb GB"
+        # Not fatal: the stand does fit, it just grows. A fresh cluster sits at
+        # ~4.6 GB of this VM; after three days the failed one had reached 7.4 GB,
+        # which is where a cold start stops fitting.
+        if ($vmMemoryGb -lt 8) {
+            Write-Host ("    NOTE: a fresh stand uses ~4.6 GB of this VM, but the number grows day by day " +
+                        "(it reached 7.4 GB before failing once). The growth is discarded data, not state: " +
+                        "run 'deploy\cleanup-stand.ps1' to drop it without a rebuild. Rebuild with " +
+                        "'deploy.ps1 -Down' + '-WithAIOps' only if the stand does not come back. " +
+                        "'memory=10GB' in %UserProfile%\.wslconfig is an optional extra (FIXES.md, section 17).") -ForegroundColor Yellow
+        }
     }
 
     # --- 1. Cluster (Terraform) ---------------------------------------------
@@ -196,8 +261,13 @@ kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\autoscaling")
 $hpaDeadline = (Get-Date).AddMinutes(2)
 $hpaMetricsReady = $false
 while ((Get-Date) -lt $hpaDeadline) {
+    # No `{"\n"}` inside the jsonpath: PowerShell 5.1 drops those embedded double
+    # quotes when it hands the argument to kubectl, which then receives a bare
+    # `\n` and dies with "unrecognized character in action: U+005C '\'" - the
+    # script exited right here on every run and steps 5-8 never happened.
+    # The metrics are only pattern-matched below, so a concatenated list is fine.
     $hpaMetrics = kubectl -n sock-shop get hpa `
-        -o jsonpath='{range .items[*]}{.status.currentMetrics}{"\n"}{end}' 2>$null
+        -o jsonpath='{range .items[*]}{.status.currentMetrics}{end}' 2>$null
     if ($hpaMetrics -match 'averageUtilization') { $hpaMetricsReady = $true; break }
     Start-Sleep -Seconds 5
 }
@@ -358,11 +428,85 @@ if ($WithLoadtest) {
     kubectl -n loadtest rollout status deploy/load-test --timeout=120s | Out-Null
 }
 
+# --- AIOps triage bot (optional) --------------------------------------------
+# Deliberately optional: the alerting stack works without it, and the bot is the
+# component of the stand that is still being built (M1 = advisor only, it acts on
+# nothing). With the switch it is built, pushed into the node and applied.
+if ($WithAIOps) {
+    Write-Host "==> AIOps triage bot (manifests-aiops)" -ForegroundColor Cyan
+
+    # The image is published nowhere: it is built here and imported straight into
+    # the k3d node's containerd, which is why the Deployment says IfNotPresent.
+    # Terraform owns the cluster on this stand, but importing an image is a k3d
+    # CLI operation with no Terraform equivalent - so the CLI is required for
+    # this step only, and the check lives here rather than at the top of the
+    # script where it would break `-Down` and plain deployments.
+    if (-not (Get-Command k3d -ErrorAction SilentlyContinue)) {
+        throw ("-WithAIOps needs the k3d CLI to get the locally built image into the node " +
+               "(k3d image import). Install k3d and retry, or deploy the app stack without the switch.")
+    }
+
+    $botDir = Join-Path $PSScriptRoot "aiops\triage-bot"
+    # Same tag as spec.template.spec.containers[0].image in 02-triage-bot-dep.yaml.
+    $botImage = "triage-bot:0.1.0-m1"
+    Write-Host "    Building $botImage from aiops\triage-bot\Dockerfile..." -ForegroundColor Cyan
+    docker build -t $botImage $botDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker build failed for $botImage (exit $LASTEXITCODE)."
+    }
+
+    # `k3d image import` writes its progress to stderr, and with
+    # $ErrorActionPreference = "Stop" a single stderr byte from a native command
+    # is a terminating error - the same trap the probes at the top of this script
+    # exist for, so they are used here too.
+    $import = Invoke-QuietProbe -Command k3d -KeepStderr `
+        -Arguments @("image", "import", $botImage, "-c", "sock-shop")
+    if ($import.ExitCode -ne 0) {
+        throw "k3d image import failed (exit $($import.ExitCode)): $($import.Output)"
+    }
+    Write-Host "    Image imported into the k3d node 'sock-shop'." -ForegroundColor Green
+
+    # The model key is OPTIONAL and follows the same contract as
+    # alertmanager-secrets above: taken from the environment or the git-ignored
+    # secrets file, otherwise read back out of the Secret already in the cluster,
+    # and never typed as a literal on a command line. Missing everywhere is not an
+    # error: the bot comes up on the rules-only path and says so in /healthz and
+    # on every card, which is a better outcome than a failed deploy.
+    $llmSecretExists = (Invoke-QuietProbe -Arguments @(
+        "-n", "monitoring", "get", "secret", "aiops-llm", "-o", "name")).ExitCode -eq 0
+    if (-not $env:DEEPSEEK_API_KEY -and $llmSecretExists) {
+        $env:DEEPSEEK_API_KEY = Get-ClusterSecretValue -Namespace monitoring `
+            -SecretName aiops-llm -Key deepseek_api_key
+    }
+    if ($env:DEEPSEEK_API_KEY) {
+        kubectl -n monitoring create secret generic aiops-llm `
+            --from-literal=deepseek_api_key=$env:DEEPSEEK_API_KEY `
+            --dry-run=client -o yaml | kubectl apply -f -
+        Write-Host "    aiops-llm Secret applied (model tier is available)."
+    } elseif ($llmSecretExists) {
+        Write-Host "    aiops-llm exists but its value is not readable - leaving it untouched"
+    } else {
+        Write-Host "    No DEEPSEEK_API_KEY in the environment or in $secretsFile - deploying the rules-only path." -ForegroundColor Yellow
+        Write-Host "    The bot still triages; /healthz will report the model tier as unavailable." -ForegroundColor Yellow
+    }
+
+    # note: examples/ is a sub-directory, and `kubectl apply -f <dir>` is NOT
+    # recursive, so examples/triage-bot-secret.example.yaml is never applied.
+    kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-aiops")
+    kubectl -n monitoring rollout status deploy/triage-bot --timeout=180s | Out-Null
+    Write-Host "    triage-bot is Ready (listening on triage-bot.monitoring.svc.cluster.local:8080)." -ForegroundColor Green
+}
+
 # --- Summary ----------------------------------------------------------------
 Write-Host ""
 Write-Host "Done. URLs:" -ForegroundColor Green
 Write-Host ("  Sock Shop   {0}" -f $appUrl)
 if ($WithLoadtest) { Write-Host "  Load test   2 locust pods hammering front-end (namespace loadtest)" }
+if ($WithAIOps) {
+    Write-Host  "  Triage bot  ClusterIP only (deliberate): kubectl -n monitoring port-forward svc/triage-bot 8081:8080"
+    Write-Host  "              http://localhost:8081/healthz | /metrics | /incidents?limit=3"
+    Write-Host  "              a synthetic alert without waiting for a rule to fire: .\aiops\triage-bot\run-local.ps1"
+}
 $toolUrls = $toolUrlsJson | ConvertFrom-Json
 foreach ($p in $toolUrls.PSObject.Properties) {
     Write-Host ("  Port {0,-6} {1}" -f $p.Name, $p.Value)

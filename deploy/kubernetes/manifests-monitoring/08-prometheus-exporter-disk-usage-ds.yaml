@@ -31,7 +31,10 @@ spec:
       containers:
       - name: read-du
         image: giantswarm/tiny-tools
-        imagePullPolicy: Always
+        # IfNotPresent, not Always: this DaemonSet runs on every node, and an
+        # Always policy re-pulls the image on every restart of the stand - one
+        # more thing happening at the exact moment the VM is at its busiest.
+        imagePullPolicy: IfNotPresent
         # FIXME threshold via env var
         # The
         command:
