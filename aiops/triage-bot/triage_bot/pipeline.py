@@ -36,12 +36,17 @@ from .adapters import AdapterError, MockAdapter, ModelAnswer, build_adapter
 from .config import Settings
 from .context import LokiClient, PrometheusClient, collect_context
 from .journal import Journal
+from .report import build_report
 from .telegram import (DECISIONS, TelegramClient, build_keyboard, esc, render_card)
 
 log = logging.getLogger("aiops.pipeline")
 
 #: How long an "ignore" press silences a fingerprint.
 SNOOZE_SECONDS = 4 * 3600
+
+#: A press can arrive twice (client retry, impatient human) and each advice is a
+#: paid model call, so the second press inside this window is refused politely.
+ADVICE_COOLDOWN_SECONDS = 30
 
 
 def incident_id(alert: dict) -> str:
@@ -75,6 +80,7 @@ class TriagePipeline:
                 self.model_unavailable_reason = str(exc)
                 log.error("model tier unavailable: %s", exc)
         self._recent: "OrderedDict[str, dict]" = OrderedDict()
+        self._advice_at: dict = {}
 
     # --- the guardrail, stated in code ---------------------------------------
     def execute(self, decision) -> None:
@@ -316,13 +322,19 @@ class TriagePipeline:
             self.telegram.answer_callback(callback_id, "нечего применять: это эскалация")
             return None
 
+        # These two answer a question instead of recording a verdict, so they do
+        # not clear the keyboard: after reading the advice a human may still
+        # press "отчёт" or "применить".
+        if action == "advice":
+            return self._handle_advice(callback_id, ident, incident, user)
+        if action == "report":
+            return self._handle_report(callback_id, ident, incident, user)
+
         if action == "approve":
             ack = ("✅ <b>принято в план</b> (" + esc(user) + "):\n"
                    f"<code>{esc(command)}</code>\n"
                    "M1 не исполняет команд: исполнение появится в M2 "
                    "(scoped ServiceAccount + второе подтверждение).")
-        elif action == "advice":
-            ack = f"📝 записано как «только совет» ({esc(user)}). Действий не будет."
         else:
             key = self._dedupe_key(incident)
             self.snooze(key, SNOOZE_SECONDS)
@@ -344,6 +356,97 @@ class TriagePipeline:
         self.telegram.clear_keyboard(message_id)
         self.telegram.send_message(ack)
         return {"incident_id": ident, "action": action, "user": user}
+
+    # --- follow-ups: advice and report ----------------------------------------
+    def explain(self, incident: dict) -> str:
+        """A follow-up a human asked for: prose from the model, nothing else.
+
+        This text is never parsed, never validated against the whitelist and
+        never executed - it is a second opinion for a person, so it takes the
+        adapters' plain-text path instead of the decision schema. The answer
+        covers the incident the bot already recorded; it does not re-query the
+        cluster, so pressing the button cannot widen what the bot can see.
+        """
+        header = (f"💡 <b>подробнее</b> · "
+                  f"<code>{esc(incident.get('alertname', '?'))}</code>\n"
+                  f"<i>#{esc(incident.get('id', ''))} · гипотезы модели, "
+                  "на кластере не проверены</i>\n\n")
+        if self.model_adapter is None:
+            return (header + "<i>модель не подключена: "
+                    + esc(self.model_unavailable_reason or "LLM_API_STYLE=mock")
+                    + ". Улики и шаг — в карточке выше.</i>")
+        try:
+            answer = self.model_adapter.answer(
+                model_mod.advice_prompt(), model_mod.build_advice_prompt(incident))
+        except (AdapterError, NotImplementedError) as exc:
+            self.metrics.inc("aiops_model_errors",
+                             adapter=getattr(self.model_adapter, "name", "?"))
+            log.error("advice failed: %s", exc)
+            return header + "<i>модель не ответила: " + esc(str(exc)[:200]) + "</i>"
+
+        self.metrics.inc("aiops_model_calls", adapter=answer.adapter)
+        footer = f"<i>{esc(answer.adapter)}"
+        tokens = answer.prompt_tokens + answer.completion_tokens
+        if tokens:
+            footer += f" · {tokens} токенов"
+        footer += " · ничего не исполнено</i>"
+        # 3500 characters: the same budget as a card, so a runaway answer is
+        # clipped instead of being rejected by Telegram after a paid call.
+        return header + esc(answer.text.strip()[:3500]) + "\n\n" + footer
+
+    def _handle_advice(self, callback_id: str, ident: str, incident: dict,
+                       user: str) -> dict | None:
+        now = time.time()
+        if now - self._advice_at.get(ident, 0.0) < ADVICE_COOLDOWN_SECONDS:
+            self.telegram.answer_callback(callback_id, "разбор уже идёт — секунду")
+            return None
+        self._advice_at[ident] = now
+        if len(self._advice_at) > 200:
+            self._advice_at.pop(min(self._advice_at, key=self._advice_at.get), None)
+
+        self.telegram.answer_callback(callback_id, "спрашиваю модель…")
+        text = self.explain(incident)
+        self.journal.append_event("human_decision", {
+            "incident_id": ident,
+            "alertname": incident.get("alertname", ""),
+            "action": "advice",
+            "user": user,
+            "executable": bool(incident.get("executable")),
+            "command": (incident.get("final") or {}).get("command") or "",
+            "executed": False,
+            "model_asked": self.model_adapter is not None,
+        })
+        self.metrics.inc("aiops_decisions_recorded", decision="advice")
+        self.telegram.send_message(text)
+        return {"incident_id": ident, "action": "advice", "user": user}
+
+    def _handle_report(self, callback_id: str, ident: str, incident: dict,
+                       user: str) -> dict:
+        """The incident as a file: the same facts, in the form that survives."""
+        self.telegram.answer_callback(callback_id, "собираю отчёт…")
+        events = [record for record in self.journal.recent(500)
+                  if record.get("incident_id") == ident]
+        report = build_report(incident, events)
+        filename = f"incident-{ident}-{incident.get('alertname') or 'alert'}.md"
+        sent = self.telegram.send_document(
+            filename, report,
+            caption=(f"📄 <b>отчёт</b> · <code>#{esc(ident)}</code> · "
+                     f"{esc(incident.get('alertname', '?'))}"))
+        self.journal.append_event("human_decision", {
+            "incident_id": ident,
+            "alertname": incident.get("alertname", ""),
+            "action": "report",
+            "user": user,
+            "executable": bool(incident.get("executable")),
+            "executed": False,
+            "sent": sent,
+        })
+        self.metrics.inc("aiops_decisions_recorded", decision="report")
+        if not sent:
+            self.telegram.send_message(
+                "📄 файл не ушёл: Telegram не принял документ. "
+                "Проверьте TELEGRAM_CHAT_ID, лимит сообщений в час и лог пода.")
+        return {"incident_id": ident, "action": "report", "user": user, "sent": sent}
 
     # --- chat commands --------------------------------------------------------
     def handle_message(self, message: dict) -> str | None:

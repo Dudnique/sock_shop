@@ -720,12 +720,12 @@ was found - by running it against the live stand. The unit suite was green befor
 
 `aiops/triage-bot`: Alertmanager POSTs a firing alert, the bot collects read-only evidence from
 Prometheus and Loki, the cascade answers - a ruleset first, a model only when the ruleset is itself
-unsure - the answer is validated against a whitelist, and a Telegram card with **approve / advice /
-ignore** appears. Nothing is executed. Delivered with it:
+unsure - the answer is validated against a whitelist, and a Telegram card with **approve / details /
+report / ignore** buttons appears. Nothing is executed. Delivered with it:
 
 | Piece | Where |
 | ----- | ----- |
-| The bot: nine stdlib-only modules plus `run-local.ps1` and 94 tests | `aiops/triage-bot/` |
+| The bot: ten stdlib-only modules plus `run-local.ps1` and 120 tests | `aiops/triage-bot/` |
 | ConfigMap, Deployment, Service, NetworkPolicy | `deploy/kubernetes/manifests-aiops/` |
 | The Alertmanager route (`aiops-triage`, `continue: true`) | `manifests-alerting/alertmanager-configmap.yaml` |
 | One deploy switch: build, `k3d image import`, optional Secret, apply, wait | `.\deploy.ps1 -WithAIOps` |
@@ -793,16 +793,53 @@ broken exporter, which is worse than being wrong about a single alert.
 honest answer is an empty string. A misleading field in a health endpoint costs more than the three
 lines it takes to remove it, and the live run is what made it visible.
 
+### Bug 4: the card named the validator instead of the cause
+
+**Symptom.** A card whose model answer had been rejected showed, as its reason, `params ignored:
+escalate_human takes none` - the validator's note - and said nothing about why the model had chosen
+that action. The evidence collected a moment earlier was gone, and so was the model's free-text
+proposal.
+
+**Cause.** Two losses in one path. `escalate()` built a fresh `Decision` and carried only `reason`,
+`raw` and the adapter name, so `evidence` and `confidence` were dropped at the exact moment they were
+most needed. The pipeline then put the validator's note into that same `reason`, letting a bookkeeping
+sentence displace the explanation a human was reading for.
+
+**Fix.** `escalate()` now carries `evidence`, `confidence` and `proposal` through; the validator's
+remark travels in its own field (`validation_note`) and is rendered as its own line; and the card was
+re-laid out to answer, in order, "why", "what did you see", "what do I do" - including the alert's own
+runbook when nothing is executable. The tier-by-tier comparison left the card entirely: it is a
+measurement for the journal, not news for a human at 3 a.m.
+
+### The follow-up buttons: advice that is advice, and a report that survives the chat
+
+`📝 без действий` promised a consultation and wrote one journal line. A label a human learns not to
+trust is worse than a missing button, so it is now `💡 подробнее` - and it does what it says: a
+**second model call** over the recorded incident, answered in prose.
+
+The prose path is deliberate (`Adapter.answer()`): no `response_format`, no JSON schema, no
+validator, no whitelist. An answer that looked like a decision while bypassing the validation that
+makes a decision trustworthy would be the worst of both shapes - so this one is text a human reads,
+and the pipeline never parses it. The call is built from the incident already in the journal, so
+pressing the button cannot query the cluster; a second press within 30 seconds is refused instead of
+being paid for twice.
+
+`📄 отчёт` (`triage_bot/report.py` plus `sendDocument`) sends the incident as a Markdown file: cause,
+evidence, the step, the cascade the card hides on purpose, what data was missing, and every human
+press with its timestamp and user. The chat scrolls and dies with the chat; the file does not. Both
+buttons leave the keyboard in place - after reading them a human can still press `approve` or
+`ignore` - and neither executes anything.
+
 ### Verification
 
 | Check | Result |
 | ----- | ------ |
-| `python -m unittest discover -s tests -t . -v` | **94 tests, green**, no network, a few seconds |
+| `python -m unittest discover -s tests -t . -v` | **120 tests, green**, no network, a few seconds |
 | `kubeconform -strict` over `manifests-aiops/` | 5/5 objects valid |
 | `amtool check-config alertmanager-configmap.yaml` | SUCCESS (the new `aiops-triage` route included) |
 | `run-local.ps1` against the live stand | one alert in, one card in Telegram, one incident in the journal |
 | `run-local.ps1 -Model deepseek -Alertname ProbeFailed -Fresh` | `deepseek-chat`, **1.64 s / 907 tokens**, then **1.85 s / 899 tokens** on a repeat run; the model answered `escalate_human` *with* `params`, the validator rejected it (`bad_params`) and kept the escalation |
-| the `совет` button | the callback recorded the human decision and the card's keyboard was cleared |
+| the `💡 подробнее` / `📄 отчёт` buttons | covered by `test_pipeline.py` and `test_report.py`: a prose call, a Markdown file, and no execution path in either |
 | `kubectl -n monitoring get pods` | `triage-bot` `1/1 Running`, 0 restarts, no service-account token in the pod |
 
 What the live run proves that the suite cannot: the pydantic-free payload path survives a real

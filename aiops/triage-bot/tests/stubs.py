@@ -67,10 +67,16 @@ class SpyTelegram:
         self.keyboards: list = []
         self.answered: list = []
         self.cleared: list = []
+        self.documents: list = []
 
     def send_message(self, text: str, keyboard=None) -> bool:
         self.messages.append(text)
         self.keyboards.append(keyboard)
+        return self.enabled
+
+    def send_document(self, filename: str, content, caption: str = "") -> bool:
+        self.documents.append({"filename": filename, "content": content,
+                               "caption": caption})
         return self.enabled
 
     def answer_callback(self, callback_id: str, text: str) -> None:
@@ -84,13 +90,15 @@ class StubAdapter(Adapter):
     """A model stand-in that returns whatever the test tells it to."""
 
     def __init__(self, settings, text: str, name: str = "stub", usage: dict | None = None,
-                 fail: str = "") -> None:
+                 fail: str = "", advice: str = "") -> None:
         super().__init__(settings)
         self.name = name
         self.text = text
+        self.advice = advice
         self.usage = usage or {}
         self.fail = fail
         self.calls: list = []
+        self.follow_ups: list = []
 
     def decide(self, system: str, user: str, alert: dict, context: dict) -> ModelAnswer:
         self.calls.append({"system": system, "user": user})
@@ -99,6 +107,16 @@ class StubAdapter(Adapter):
             raise AdapterError(self.fail)
         return ModelAnswer(text=self.text, adapter=self.name, model="stub-model",
                            latency_ms=7, usage=self.usage)
+
+    def answer(self, system: str, user: str) -> ModelAnswer:
+        """The prose path: recorded separately from `decide` on purpose."""
+        self.follow_ups.append({"system": system, "user": user})
+        if self.fail:
+            from triage_bot.adapters import AdapterError
+            raise AdapterError(self.fail)
+        return ModelAnswer(text=self.advice or "гипотеза: сети, а не приложение",
+                           adapter=self.name, model="stub-model", latency_ms=5,
+                           usage=self.usage)
 
 
 def make_pipeline(settings=None, model_adapter=None, telegram=None, prometheus=None,

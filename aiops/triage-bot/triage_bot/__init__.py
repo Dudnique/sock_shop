@@ -3,7 +3,9 @@
 The bot receives Alertmanager webhooks, collects read-only context from
 Prometheus and Loki, asks a model adapter for a decision, validates that
 decision against a strict schema and a fixed action whitelist, and sends the
-result to Telegram with approve / advice / ignore buttons.
+result to Telegram with approve / details / report / ignore buttons. The details
+button buys a second, prose-only model answer; the report button sends the
+incident as a Markdown file. Neither executes anything.
 
 Deliberate M1 limits (see README.md in this directory):
 

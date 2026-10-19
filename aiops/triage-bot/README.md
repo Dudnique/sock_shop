@@ -2,8 +2,8 @@
 
 Alertmanager hands this service one firing alert. The bot collects read-only
 evidence from Prometheus and Loki, decides what to do - or refuses to decide -
-and puts the result into Telegram as a card with **approve / advice / ignore**
-buttons. In M1 it executes nothing, and that is a property of the artifact rather
+and puts the result into Telegram as a card with **approve / details / report /
+ignore** buttons. In M1 it executes nothing, and that is a property of the artifact rather
 than a promise in a document (see [The guardrail](#the-guardrail)).
 
 The image is `python:3.12-slim` plus one package: **no dependencies, no
@@ -190,7 +190,8 @@ decision the contract had already rejected. Two runs, the same outcome.
 | `triage_bot/adapters.py` | `MockAdapter` (the tier-0 ruleset, `RULES`, `PREMISES`) and `OpenAICompatibleAdapter` |
 | `triage_bot/model.py` | the contract: decision schema, action whitelist, prompt, validator |
 | `triage_bot/pipeline.py` | the cascade, dedupe/snooze, `handle_webhook`, `handle_callback` |
-| `triage_bot/telegram.py` | the card, its keyboard, the long-poll loop for button presses |
+| `triage_bot/telegram.py` | the card, its keyboard, `sendDocument`, the long-poll loop for button presses |
+| `triage_bot/report.py` | one incident plus its human decisions as a Markdown report |
 | `triage_bot/journal.py` | incidents and human decisions on disk (`/data`, append-only JSONL) |
 | `triage_bot/metrics.py` | the `aiops_*` series in the Prometheus text format |
 | `triage_bot/server.py` | five HTTP routes on `http.server` - no framework, no WSGI server |
@@ -307,15 +308,27 @@ its default and nobody notices until a demo.
 
 ## The Telegram card
 
-One incident, one message: the alert with its labels, the decision, the tier that
-produced it, the evidence, what was **not** collected (`missing`), and the buttons.
-`build_keyboard` adds `approve` only for an executable decision - an escalation
-offers `advice` and `ignore` only, because there is nothing to approve. Pressing
+One incident, one message: the cause first, the facts it rests on second, and only
+then the step - a whitelisted command, a free-text proposal the bot refuses to
+execute, or the alert's own runbook when there is no command at all. The bot's
+bookkeeping (adapter, tokens) is one footer line; the tier-by-tier comparison
+stays in the journal, where it is a measurement rather than news.
+
+Buttons come from the whitelist, not from the text. `approve` exists only for an
+executable decision - an escalation offers the follow-ups and `ignore`.
+`💡 подробнее` makes a **second, plain-text model call** (no JSON schema, no
+validator, no execution): a few hypotheses, what would confirm them, what would
+rule them out. `📄 отчёт` sends the incident as a Markdown document
+(`triage_bot/report.py`) that includes the cascade the card hides and every human
+press with its timestamp - the artifact that outlives the chat. Both are
+read-only: the report is built from the journal, so pressing it cannot query the
+cluster. A repeat "подробнее" within 30 seconds is refused instead of being paid
+for twice.
+
 `ignore` snoozes the fingerprint for **4 hours** (`SNOOZE_SECONDS`), and the next
-firing of that fingerprint is skipped as `snoozed`; `approve` and `advice` are
-written to the journal and counted in `aiops_decisions_recorded{decision=...}`. In
-M1 all three are a *record*, never an action, and the chat answers with exactly
-what was written down.
+firing of that fingerprint is skipped as `snoozed`; every press is written to the
+journal and counted in `aiops_decisions_recorded{decision=...}`. In M1 none of
+them executes anything, and the chat answers with exactly what was written down.
 
 Chat commands: `/status` (configuration and limits), `/last` (the last incident),
 `/help`; anything else is ignored on purpose.
@@ -338,6 +351,7 @@ the Service carries `prometheus.io/scrape: "true"` so the existing
 | `aiops_schema_violations{kind}` | the model answered, but not per contract |
 | `aiops_context_failures{source}` | Prometheus or Loki went quiet |
 | `aiops_telegram_sent` / `aiops_telegram_suppressed` | delivered, or rate-limited |
+| `aiops_telegram_documents` | reports delivered as files |
 | `aiops_decisions_recorded{decision}` | human button presses |
 | `aiops_last_incident_timestamp_seconds` | freshness - the gauge a "silent bot" alert reads |
 
@@ -345,16 +359,17 @@ the Service carries `prometheus.io/scrape: "true"` so the existing
 
 ```powershell
 cd aiops\triage-bot
-python -m unittest discover -s tests -t . -v      # 94 tests, seconds, no network
+python -m unittest discover -s tests -t . -v      # 120 tests, seconds, no network
 ```
 
 | Test file | What it pins |
 | --------- | ------------ |
 | `test_model.py` | the decision schema: unknown action, missing key, `replicas: 0`, prose instead of JSON, `proposal` without `escalate_human` |
-| `test_adapters.py` | the ruleset, `PREMISES` (a contradiction escalates, a missing metric does not), the provider table |
+| `test_adapters.py` | the ruleset, `PREMISES` (a contradiction escalates, a missing metric does not), the provider table, the prose `answer()` path |
 | `test_context.py` | the PromQL queries, the **Loki label names** (the bug), `missing` on every failure |
-| `test_pipeline.py` | the cascade order, dedupe, snooze, tier metrics, escalation reasons |
-| `test_telegram.py` | the card and the keyboard: three buttons for an action, two for an escalation |
+| `test_pipeline.py` | the cascade order, dedupe, snooze, tier metrics, escalation reasons, the two follow-up buttons |
+| `test_report.py` | the report: cause -> grounds -> step, the hidden cascade, human presses in order, tables that survive a `\|` |
+| `test_telegram.py` | the card, four buttons for an action and three for an escalation, the hand-built `sendDocument` multipart |
 | `test_server.py` | the five routes, `400` on a bad body, `200` on a failed triage |
 | `test_coverage.py` | every shipped rule with `aiops="true"` has a ruleset answer - and vice versa |
 | `test_manifests.py` | 15 checks between the YAML and the code: ConfigMap keys vs `config.py`, the image tag vs `deploy.ps1`, the guardrails, the Alertmanager webhook URL |

@@ -7,11 +7,14 @@ and an approve button on an escalation teaches people to click without reading.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from triage_bot.telegram import TelegramClient, build_keyboard, esc, render_card
+from triage_bot import telegram as telegram_mod
+from triage_bot.telegram import (TelegramClient, build_keyboard, document_body, esc,
+                                 render_card, safe_filename)
 from tests.stubs import make_settings
 
 
@@ -102,15 +105,20 @@ class EscapingTests(unittest.TestCase):
 
 
 class KeyboardTests(unittest.TestCase):
-    def test_action_gets_three_buttons_including_approve(self) -> None:
+    def test_action_gets_approve_and_both_follow_ups(self) -> None:
         keyboard = build_keyboard("1a2b3c4d", executable=True)
         datas = [button["callback_data"] for button in keyboard[0]]
-        self.assertEqual(datas, ["approve:1a2b3c4d", "advice:1a2b3c4d", "ignore:1a2b3c4d"])
+        self.assertEqual(datas, ["approve:1a2b3c4d", "advice:1a2b3c4d",
+                                 "report:1a2b3c4d", "ignore:1a2b3c4d"])
+        # The label has to say what the press does: this one really asks the model.
+        self.assertIn("подробнее", keyboard[0][1]["text"])
+        self.assertIn("отчёт", keyboard[0][2]["text"])
 
     def test_escalation_has_no_approve_button(self) -> None:
         keyboard = build_keyboard("1a2b3c4d", executable=False)
         datas = [button["callback_data"] for button in keyboard[0]]
-        self.assertEqual(datas, ["advice:1a2b3c4d", "ignore:1a2b3c4d"])
+        self.assertEqual(datas, ["advice:1a2b3c4d", "report:1a2b3c4d",
+                                 "ignore:1a2b3c4d"])
 
 
 class CardContentTests(unittest.TestCase):
@@ -153,6 +161,72 @@ class CardContentTests(unittest.TestCase):
         card = render_card(sample_incident())
         for tag in ("b", "i", "code", "pre", "blockquote"):
             self.assertEqual(card.count(f"<{tag}>"), card.count(f"</{tag}>"), tag)
+
+
+class DocumentTests(unittest.TestCase):
+    """`sendDocument` is hand-built multipart: the format is ours to get wrong."""
+
+    def _client(self) -> TelegramClient:
+        settings = make_settings(telegram_chat_id="42")
+        token_file = Path(tempfile.mkdtemp()) / "token"
+        token_file.write_text("123:ABC", encoding="utf-8")
+        settings.telegram_token_file = str(token_file)
+        return TelegramClient(settings)
+
+    def test_the_multipart_body_carries_chat_file_and_caption(self) -> None:
+        boundary, body = document_body("42", "incident-abc.md", b"# report",
+                                       caption="<b>отчёт</b>")
+        text = body.decode("utf-8")
+        self.assertIn(f"--{boundary}\r\n", text)
+        self.assertIn('name="chat_id"\r\n\r\n42\r\n', text)
+        self.assertIn('name="document"; filename="incident-abc.md"', text)
+        self.assertIn("# report", text)
+        self.assertTrue(text.endswith(f"--{boundary}--\r\n"))
+
+    def test_a_filename_cannot_become_a_path(self) -> None:
+        # Alert labels and ids reach this string, so `../` must not survive it.
+        self.assertEqual(safe_filename("../../etc/passwd"), "etc-passwd")
+        self.assertEqual(safe_filename("Deployment/Replicas Unavailable"),
+                         "Deployment-Replicas-Unavailable")
+        self.assertEqual(safe_filename(""), "incident")
+
+    def test_send_document_posts_to_send_document(self) -> None:
+        client = self._client()
+        seen: dict = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                return json.dumps({"ok": True, "result": {"message_id": 1}}).encode()
+
+        def fake_urlopen(request, timeout=30):
+            seen["url"] = request.full_url
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            seen["type"] = headers.get("content-type", "")
+            seen["data"] = request.data
+            return FakeResponse()
+
+        original = telegram_mod.urllib.request.urlopen
+        telegram_mod.urllib.request.urlopen = fake_urlopen
+        try:
+            self.assertTrue(client.send_document("incident.md", "# x", "cap"))
+        finally:
+            telegram_mod.urllib.request.urlopen = original
+
+        self.assertTrue(seen["url"].endswith("/sendDocument"))
+        self.assertTrue(seen["type"].startswith("multipart/form-data; boundary="))
+        self.assertIn(b'filename="incident.md"', seen["data"])
+        # The token travels in the URL, so the body must never repeat it.
+        self.assertNotIn(b"123:ABC", seen["data"])
+
+    def test_a_disabled_client_does_not_upload(self) -> None:
+        client = TelegramClient(make_settings(telegram_chat_id=""))
+        self.assertFalse(client.send_document("x.md", "# x"))
 
 
 class RateLimitTests(unittest.TestCase):

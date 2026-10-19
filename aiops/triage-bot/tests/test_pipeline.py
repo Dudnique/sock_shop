@@ -221,5 +221,121 @@ class FailureHandlingTests(unittest.TestCase):
         self.assertFalse(notifications[0]["telegram_enabled"])
 
 
+class FollowUpTests(unittest.TestCase):
+    """The two buttons that answer a question instead of recording a verdict."""
+
+    def _triaged(self, pipeline) -> dict:
+        summary = pipeline.handle_webhook(alert_payload())
+        return pipeline.find_incident(summary["triaged"][0]["id"])
+
+    @staticmethod
+    def _press(action: str, ident: str, callback_id: str = "cb1") -> dict:
+        return {"id": callback_id, "data": f"{action}:{ident}",
+                "from": {"username": "vlad"}, "message": {"message_id": 10}}
+
+    def test_advice_asks_the_model_for_prose_and_executes_nothing(self) -> None:
+        settings = make_settings(model_adapter="deepseek")
+        stub = StubAdapter(settings, text=action_text(),
+                           advice="Проверить:\nkubectl -n sock-shop get po")
+        telegram = SpyTelegram(enabled=True)
+        pipeline = make_pipeline(settings=settings, model_adapter=stub, telegram=telegram)
+        incident = self._triaged(pipeline)
+
+        result = pipeline.handle_callback(self._press("advice", incident["id"]))
+
+        self.assertEqual(result["action"], "advice")
+        # A prose call, not a second decision: the cascade is not re-run.
+        self.assertEqual(stub.calls, [])
+        self.assertEqual(len(stub.follow_ups), 1)
+        self.assertIn(incident["alertname"], stub.follow_ups[0]["user"])
+        self.assertIn("kubectl -n sock-shop get po", telegram.messages[-1])
+        self.assertIn("ничего не исполнено", telegram.messages[-1])
+        # The keyboard stays: after reading, a human can still press "отчёт".
+        self.assertEqual(telegram.cleared, [])
+        events = [event for event in pipeline.journal.recent(10)
+                  if event.get("action") == "advice"]
+        self.assertEqual(len(events), 1)
+        self.assertFalse(events[0]["executed"])
+
+    def test_a_double_press_does_not_pay_for_the_model_twice(self) -> None:
+        settings = make_settings(model_adapter="deepseek")
+        stub = StubAdapter(settings, text=action_text())
+        telegram = SpyTelegram(enabled=True)
+        pipeline = make_pipeline(settings=settings, model_adapter=stub, telegram=telegram)
+        incident = self._triaged(pipeline)
+
+        pipeline.handle_callback(self._press("advice", incident["id"], "cb1"))
+        second = pipeline.handle_callback(self._press("advice", incident["id"], "cb2"))
+
+        self.assertIsNone(second)
+        self.assertEqual(len(stub.follow_ups), 1)
+        self.assertEqual(telegram.answered[-1][1], "разбор уже идёт — секунду")
+
+    def test_advice_without_a_model_says_so_instead_of_faking_it(self) -> None:
+        telegram = SpyTelegram(enabled=True)
+        pipeline = make_pipeline(telegram=telegram)
+        incident = self._triaged(pipeline)
+
+        pipeline.handle_callback(self._press("advice", incident["id"]))
+
+        self.assertIn("модель не подключена", telegram.messages[-1])
+        self.assertIn("карточке выше", telegram.messages[-1])
+
+    def test_a_failing_model_is_reported_not_swallowed(self) -> None:
+        settings = make_settings(model_adapter="deepseek")
+        stub = StubAdapter(settings, text=action_text(), fail="HTTP 503: overloaded")
+        telegram = SpyTelegram(enabled=True)
+        pipeline = make_pipeline(settings=settings, model_adapter=stub, telegram=telegram)
+        incident = self._triaged(pipeline)
+
+        pipeline.handle_callback(self._press("advice", incident["id"]))
+
+        self.assertIn("модель не ответила", telegram.messages[-1])
+        self.assertIn("503", telegram.messages[-1])
+        # The press is still recorded: a failed follow-up is an event too.
+        events = [event for event in pipeline.journal.recent(10)
+                  if event.get("action") == "advice"]
+        self.assertEqual(len(events), 1)
+        self.assertFalse(events[0]["model_asked"] is False)  # adapter was configured
+
+    def test_report_is_sent_as_a_markdown_document_with_the_human_actions(self) -> None:
+        settings = make_settings(model_adapter="deepseek")
+        stub = StubAdapter(settings, text=action_text())
+        telegram = SpyTelegram(enabled=True)
+        pipeline = make_pipeline(settings=settings, model_adapter=stub, telegram=telegram)
+        incident = self._triaged(pipeline)
+        pipeline.handle_callback(self._press("advice", incident["id"], "cb1"))
+
+        result = pipeline.handle_callback(self._press("report", incident["id"], "cb2"))
+
+        self.assertTrue(result["sent"])
+        document = telegram.documents[0]
+        self.assertTrue(document["filename"].endswith(".md"))
+        self.assertIn(incident["id"], document["filename"])
+        self.assertIn("📄", document["caption"])
+        body = document["content"]
+        self.assertIn(f"# Инцидент #{incident['id']}", body)
+        self.assertIn(incident["final"]["reason"], body)
+        self.assertIn(incident["final"]["command"], body)
+        self.assertIn("## Действия человека", body)
+        self.assertIn("advice", body)
+        self.assertIn("**vlad**", body)
+        # The command came from the card; the report must not imply it was chosen.
+        self.assertIn("шаг:", body)
+
+    def test_a_rejected_document_is_reported_back(self) -> None:
+        telegram = SpyTelegram(enabled=False)
+        pipeline = make_pipeline(telegram=telegram)
+        incident = self._triaged(pipeline)
+
+        result = pipeline.handle_callback(self._press("report", incident["id"]))
+
+        self.assertFalse(result["sent"])
+        self.assertIn("файл не ушёл", telegram.messages[-1])
+        events = [event for event in pipeline.journal.recent(10)
+                  if event.get("action") == "report"]
+        self.assertFalse(events[0]["sent"])
+
+
 if __name__ == "__main__":
     unittest.main()

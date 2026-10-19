@@ -22,10 +22,12 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections import deque
 
 from .config import Settings
@@ -35,12 +37,14 @@ log = logging.getLogger("aiops.telegram")
 API_BASE = "https://api.telegram.org"
 
 #: Decisions a human can press. `approve` is only offered for whitelist actions.
-#: The labels say what actually happens in M1 - an earlier "только совет" promised
-#: advice and only wrote a journal line, which is exactly the kind of label a
-#: human stops trusting.
+#: The labels say what actually happens: pressing "подробнее" really does ask the
+#: model for a second opinion (and costs tokens), pressing "отчёт" really does send
+#: a file. A label that promises less than it does is as bad as one that promises
+#: more - an earlier "только совет" only wrote a journal line.
 DECISIONS = {
     "approve": "✅ применить (план M1)",
-    "advice": "📝 без действий",
+    "advice": "💡 подробнее",
+    "report": "📄 отчёт",
     "ignore": "🔇 не беспокоить 4 ч",
 }
 
@@ -54,6 +58,37 @@ def short(value, limit: int = 160) -> str:
     """One evidence line stays one line: a card, not a log dump."""
     text = str(value).strip()
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def safe_filename(name: str) -> str:
+    """A filename, not a path: alert labels can contain anything a cluster has."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name)).strip("-.")
+    return (cleaned or "incident")[:90]
+
+
+def document_body(chat_id: str, filename: str, content: bytes,
+                  caption: str = "") -> tuple[str, bytes]:
+    """A multipart body, built here so the wire format is testable offline.
+
+    Telegram's `sendDocument` takes `multipart/form-data`; with no HTTP library
+    in the image, the boundary and the part headers are ours to get right.
+    """
+    boundary = "----aiops" + uuid.uuid4().hex
+    chunks: list[bytes] = []
+    for name, value in (("chat_id", chat_id), ("parse_mode", "HTML"),
+                        ("caption", caption[:1000])):
+        if not value:
+            continue
+        chunks.append(
+            (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+             f"{value}\r\n").encode("utf-8"))
+    chunks.append(
+        (f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; "
+         f"filename=\"{filename}\"\r\n"
+         "Content-Type: text/markdown; charset=utf-8\r\n\r\n").encode("utf-8"))
+    chunks.append(content)
+    chunks.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    return boundary, b"".join(chunks)
 
 
 class TelegramError(RuntimeError):
@@ -133,6 +168,49 @@ class TelegramClient:
             self.metrics.inc("aiops_telegram_sent")
         return True
 
+    def send_document(self, filename: str, content, caption: str = "") -> bool:
+        """An incident report as a file: the chat scrolls, a record does not.
+
+        The same hourly ceiling applies as for messages: a loop that presses
+        "отчёт" must not become a loop that uploads files.
+        """
+        if not self.enabled:
+            log.info("telegram is not configured - document not sent")
+            return False
+        if self._rate_limited():
+            log.warning("telegram rate limit reached (%s/h) - document suppressed",
+                        self.settings.telegram_max_per_hour)
+            if self.metrics:
+                self.metrics.inc("aiops_telegram_suppressed")
+            return False
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        boundary, body = document_body(self.chat_id, safe_filename(filename),
+                                       content, caption)
+        request = urllib.request.Request(
+            f"{API_BASE}/bot{self._token}/sendDocument", data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            log.error("telegram sendDocument failed: HTTP %s: %s", exc.code, detail)
+            return False
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            log.error("telegram sendDocument failed: %s", exc)
+            return False
+        except json.JSONDecodeError:
+            log.error("telegram sendDocument: the answer is not JSON")
+            return False
+        if not payload.get("ok"):
+            log.error("telegram sendDocument: %s", payload.get("description", "not ok"))
+            return False
+        if self.metrics:
+            self.metrics.inc("aiops_telegram_documents")
+        return True
+
     def answer_callback(self, callback_id: str, text: str) -> None:
         try:
             self._call("answerCallbackQuery",
@@ -204,6 +282,7 @@ def build_keyboard(incident_id: str, executable: bool) -> list:
         row.append({"text": DECISIONS["approve"],
                     "callback_data": f"approve:{incident_id}"})
     row.append({"text": DECISIONS["advice"], "callback_data": f"advice:{incident_id}"})
+    row.append({"text": DECISIONS["report"], "callback_data": f"report:{incident_id}"})
     row.append({"text": DECISIONS["ignore"], "callback_data": f"ignore:{incident_id}"})
     return [row]
 

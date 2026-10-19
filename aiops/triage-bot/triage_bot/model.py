@@ -219,6 +219,61 @@ def build_user_prompt(alert: dict, context: dict) -> str:
     return "\n".join(lines)
 
 
+ADVICE_PROMPT = """You are the same SRE assistant, now answering a follow-up about one
+incident you have already triaged. The engineer has the card; you get the same
+facts and nothing else.
+
+Write plain text in Russian, at most 12 short lines. No JSON, no markdown:
+- 2-4 hypotheses, most likely first, one line each: what it is and which fact
+  from the incident supports it;
+- then a line "Проверить:" and concrete commands (kubectl, PromQL, LogQL) that
+  would confirm or reject them, one per line;
+- then a line "Отбросить, если:" and one line per hypothesis saying what would
+  make it wrong.
+
+Rules:
+- Use only the facts in the incident. If something is unknown, name what is
+  unknown instead of inventing a service, a metric or a log line.
+- You still cannot run anything: every command is for a human to run.
+- No preamble, no restating the card, no apology."""
+
+
+def advice_prompt() -> str:
+    return ADVICE_PROMPT
+
+
+def build_advice_prompt(incident: dict) -> str:
+    """The recorded incident, compact: a follow-up must not need the cluster.
+
+    Everything here was collected before the human pressed the button, so this
+    call cannot widen what the bot saw - it only re-reads its own journal entry.
+    """
+    labels = incident.get("labels") or {}
+    annotations = incident.get("annotations") or {}
+    final = incident.get("final") or {}
+    lines = ["INCIDENT", json.dumps({
+        "id": incident.get("id", ""),
+        "alertname": incident.get("alertname", ""),
+        "labels": labels,
+        "summary": annotations.get("summary", ""),
+        "description": annotations.get("description", ""),
+        "runbook": annotations.get("runbook", ""),
+        "reason": final.get("reason", ""),
+        "command": final.get("command", ""),
+        "proposal": final.get("proposal", ""),
+        "executable": bool(incident.get("executable")),
+    }, ensure_ascii=False, indent=2)]
+
+    evidence = final.get("evidence") or []
+    if evidence:
+        lines.append("EVIDENCE")
+        lines.extend(f"- {item}" for item in evidence[:8])
+    missing = incident.get("missing") or []
+    if missing:
+        lines.append("NOT AVAILABLE: " + "; ".join(str(item) for item in missing))
+    return "\n".join(lines)
+
+
 def escalate(reason: str, adapter: str = "", model: str = "",
              raw: dict | None = None, proposal: str = "",
              evidence: list | None = None, confidence: float = 0.0,

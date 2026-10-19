@@ -52,6 +52,13 @@ class MockAdapterTests(unittest.TestCase):
         self.assertEqual(first.latency_ms, 0)
         self.assertEqual(first.usage, {})
 
+    def test_advice_is_honestly_offline_instead_of_invented(self) -> None:
+        """Tier 0 cannot have a second opinion, and must not pretend to."""
+        answer = self.adapter.answer("SYS", "USER")
+        self.assertIn("Оффлайн-режим", answer.text)
+        self.assertIn("kubectl", answer.text)
+        self.assertEqual(answer.usage, {})
+
     def test_evidence_comes_from_the_live_context(self) -> None:
         joined = " ".join(self.adapter.decision_for(alert(), CONTEXT)["evidence"])
         self.assertIn("replicas_available[front-end] = 0", joined)
@@ -207,6 +214,28 @@ class OpenAICompatibleTests(unittest.TestCase):
         self.assertEqual(result.prompt_tokens, 700)
         self.assertEqual(result.completion_tokens, 40)
         self.assertEqual(result.adapter, "deepseek")
+
+    def test_advice_is_requested_as_prose_without_the_json_contract(self) -> None:
+        """A follow-up is read by a human, so it must not be shaped like a decision.
+
+        `response_format: json_object` here would make the model answer in the
+        same schema as `decide()`, and the card's reader would have to work out
+        which of the two answers is the one that counts.
+        """
+        with StubChatServer([completion("Гипотеза: приложение не слушает порт")]) as stub:
+            settings = make_settings(model_adapter="deepseek", llm_base_url=stub.base_url)
+            adapter = OpenAICompatibleAdapter(settings, base_url=stub.base_url,
+                                              model="deepseek-chat", api_key="sk-test",
+                                              provider_name="deepseek")
+            result = adapter.answer("SYS", "USER")
+
+        self.assertEqual(len(stub.requests), 1)
+        body = stub.requests[0]["body"]
+        self.assertNotIn("response_format", body)
+        self.assertEqual([message["role"] for message in body["messages"]],
+                         ["system", "user"])
+        self.assertEqual(result.text, "Гипотеза: приложение не слушает порт")
+        self.assertEqual(result.prompt_tokens, 700)
 
     def test_a_provider_without_response_format_is_retried_once(self) -> None:
         with StubChatServer([completion("", code=400,
