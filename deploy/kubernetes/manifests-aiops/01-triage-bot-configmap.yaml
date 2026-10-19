@@ -21,12 +21,20 @@ metadata:
     app.kubernetes.io/name: triage-bot
 data:
   # --- model tier ----------------------------------------------------------
-  # `mock` is the tier-0 ruleset: deterministic, offline, needs no key. It is
-  # the M1 default on purpose - the bot is useful, and every test in CI is
-  # meaningful, without a single byte leaving the cluster. Switch to `deepseek`
-  # once the aiops-llm Secret exists, to compare a model's answer with the
-  # ruleset's on the very same alerts.
-  MODEL_ADAPTER: "mock"
+  # Tier 0 is always the deterministic ruleset (triage_bot/adapters.py): it needs
+  # no key, no network and no tokens, and it answers the alerts this stand
+  # actually fires. This knob is tier 1 - the model that is asked only when the
+  # ruleset is itself unsure (see CASCADE_ENABLED below).
+  #
+  # The shipped value is `deepseek` (OpenAI-compatible HTTPS API, no local
+  # runtime): the stand exists to demonstrate the cascade, and `mock` here means
+  # "no model at all", which silently turns the cascade into "rules + escalate".
+  # Changing the provider is a ConfigMap edit, never a code change: `openai` and
+  # `ollama` are rows in the provider table (triage_bot/config.py). With no
+  # `aiops-llm` Secret the mounted key is empty, the bot logs "model tier is NOT
+  # available", and each card keeps the ruleset's answer plus that reason - the
+  # degraded path is visible, not silent.
+  MODEL_ADAPTER: "deepseek"
   # Ask the model only when the ruleset is itself unsure (confidence below
   # CONFIDENCE_THRESHOLD). That is what keeps the token bill proportional to the
   # genuinely ambiguous alerts instead of to the alert volume.

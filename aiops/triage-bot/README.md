@@ -32,9 +32,11 @@ needs no `pip install`, no lockfile and no cache.
 Three properties of that picture are worth stating out loud, because each one is
 the answer to a failure this project has already had once:
 
-* **the model is optional** - `MODEL_ADAPTER=mock` (the default) means there is
-  no model at all, and the bot is still useful: it answers the alerts this stand
-  actually fires, from a table that a test keeps in sync with the rule file;
+* **a model is never required for the bot to be useful** - tier 0 is the
+  ruleset, and it alone answers the alerts this stand actually fires, from a
+  table that a test keeps in sync with the rule file. `MODEL_ADAPTER` selects
+  tier 1 (the shipped ConfigMap says `deepseek`); `mock` there means "no model
+  at all" - the offline stand and CI;
 * **a model is never trusted** - its answer travels the same validator as the
   ruleset's, and a rejected answer becomes an escalation, never an action;
 * **a gap is reported, not filled** - what the bot could not see (pod events,
@@ -244,12 +246,13 @@ never printed, never passed on a command line and never reaches the journal.
    `kubectl apply -f <dir>` is not recursive);
 5. waits for the rollout and prints one summary line per step.
 
-Switching the tier-1 provider is a ConfigMap edit: set `MODEL_ADAPTER: deepseek`
-in `01-triage-bot-configmap.yaml` and re-apply. The next card then shows both
-answers - the ruleset's and the model's - while `MODEL_ADAPTER: mock` (the shipped
-default) means there is no model tier at all and the pipeline ends at the ruleset.
-That default is deliberate: the stand must be demonstrable with no key and no
-outbound network.
+Switching the tier-1 provider is a ConfigMap edit, never a code change: set
+`MODEL_ADAPTER` in `01-triage-bot-configmap.yaml` and re-apply. The shipped value
+is `deepseek`, so on any alert the ruleset is unsure about the next card carries
+both answers - the ruleset's and the model's; `openai` and `ollama` are rows in
+the same provider table. `MODEL_ADAPTER: mock` means there is no model tier at
+all and the pipeline ends at the ruleset: that is the offline stand (no key, no
+outbound network) and it is what the unit tests run on.
 
 ## Configuration reference
 
@@ -262,7 +265,7 @@ in `kubectl describe pod` and to every child process.
 | Variable | Default in code | Set by the ConfigMap | Meaning |
 | -------- | --------------- | -------------------- | ------- |
 | `LISTEN_HOST` / `LISTEN_PORT` | `0.0.0.0` / `8080` | - | where `ThreadingHTTPServer` listens |
-| `MODEL_ADAPTER` | `mock` | `mock` | `mock`, `deepseek`, `openai`, `ollama`; an unknown name is shown, never guessed |
+| `MODEL_ADAPTER` | `mock` | `deepseek` | `mock`, `deepseek`, `openai`, `ollama`; an unknown name is shown, never guessed |
 | `MODEL_NAME` | provider default | - | overrides the model id (`deepseek-chat`, `gpt-4o-mini`, `llama3.1`) |
 | `LLM_BASE_URL` | provider default | - | any OpenAI-compatible gateway, vLLM or LiteLLM proxy included |
 | `LLM_API_KEY_FILE` | provider default | - | the mounted key file; an empty file means keyless (Ollama) |

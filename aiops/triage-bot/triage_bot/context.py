@@ -148,6 +148,22 @@ def plan_queries(labels: dict) -> list:
              "sum(container_memory_working_set_bytes"
              f'{{namespace="{namespace}", pod=~"{deployment}.*", container!="POD"}})'),
         ]
+    if not deployment and not node:
+        # The alert names no workload (a probe, a dead scrape target, a pod that
+        # belongs to some Deployment). Without this, the report for such an alert
+        # contained nothing but "probe_success=0" and the model had no object it
+        # could name - live, DeepSeek answered "escalate" for a stand whose
+        # front-end was simply scaled to zero. Ask the namespace instead of
+        # guessing, and keep the names (see the formatting in collect_context):
+        # a bare "0" is not evidence, "front-end=0" is.
+        queries += [
+            ("deployments_at_zero[namespace]",
+             "max by (deployment) (kube_deployment_spec_replicas"
+             f'{{namespace="{namespace}"}}) == 0'),
+            ("deployments_unavailable[namespace]",
+             "max by (deployment) (kube_deployment_status_replicas_unavailable"
+             f'{{namespace="{namespace}"}}) > 0'),
+        ]
     if pod:
         queries.append(
             (f"pod_restarts[{pod}]",
@@ -208,6 +224,13 @@ def collect_context(alert: dict, settings, prometheus: PrometheusClient,
             names = [f'{item["metric"].get("job", "?")}/'
                      f'{item["metric"].get("instance", "?")}' for item in result[:5]]
             context["prometheus"][key] = "; ".join(names)
+        elif key.endswith("[namespace]"):
+            # One value per Deployment, and the name is the point: this query
+            # exists to tell the model *which* object is broken, so dropping the
+            # label would leave it exactly as blind as before the query.
+            context["prometheus"][key] = "; ".join(
+                f'{item["metric"].get("deployment", "?")}={item["value"]}'
+                for item in result[:8])
         else:
             value = _first(result)
             if value == "":

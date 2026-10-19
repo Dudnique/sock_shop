@@ -53,6 +53,37 @@ class ValidateDecisionTests(unittest.TestCase):
              "reason": "not sure", "evidence": ["nothing to go on"]}, self.settings)
         self.assertTrue(decision.escalated)
 
+    def test_an_escalation_keeps_its_evidence_and_confidence(self) -> None:
+        """The card used to say "нужен инженер" and nothing else.
+
+        `validate_decision` rebuilt every escalation through `escalate()`, which
+        dropped the evidence and the confidence that the ruleset (or the model)
+        had just collected. The live stand showed the result on its first card.
+        """
+        decision = model_mod.validate_decision(
+            {"action_id": "escalate_human", "confidence": 0.5,
+             "reason": "деплоймент в нуле", "evidence": ["replicas_available = 0"]},
+            self.settings)
+        self.assertTrue(decision.escalated)
+        self.assertEqual(decision.confidence, 0.5)
+        self.assertEqual(decision.evidence, ["replicas_available = 0"])
+
+    def test_params_next_to_an_escalation_are_dropped_with_a_note(self) -> None:
+        """DeepSeek sent escalate_human + params, and M1 rejected the whole answer.
+
+        An escalation executes nothing, so those params cannot cause harm: they
+        are dropped, the cause and the proposal survive, and the note says so.
+        """
+        decision = model_mod.validate_decision(
+            {"action_id": "escalate_human", "confidence": 0.4, "reason": "r",
+             "evidence": ["e"],
+             "params": {"namespace": "sock-shop", "deployment": "front-end",
+                        "replicas": 1}}, self.settings)
+        self.assertEqual(decision.params, {})
+        self.assertEqual(decision.evidence, ["e"])
+        self.assertIn("params ignored", decision.validation_note)
+        self.assertIn("params ignored", decision.to_dict()["validation_note"])
+
     def test_replicas_out_of_range_is_rejected(self) -> None:
         for replicas in (0, 11, -1):
             with self.assertRaises(model_mod.DecisionError) as ctx:

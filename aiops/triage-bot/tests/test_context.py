@@ -24,6 +24,18 @@ class PlanQueriesTests(unittest.TestCase):
         queries = dict(plan_queries({"probe_scope": "ingress"}))
         self.assertIn("probe_success", queries)
 
+    def test_a_label_less_alert_asks_the_namespace_which_deployments_are_broken(self) -> None:
+        """A probe alert names no workload, so the bot asks the namespace.
+
+        Without this query the report for a scaled-to-zero front-end contained
+        only `probe_success=0`, and the model had no object it could name.
+        """
+        queries = dict(plan_queries({"namespace": "sock-shop", "probe_scope": "ingress"}))
+        self.assertIn("deployments_at_zero[namespace]", queries)
+        self.assertIn("deployments_unavailable[namespace]", queries)
+        self.assertIn('namespace="sock-shop"', queries["deployments_at_zero[namespace]"])
+        self.assertNotIn("replicas_available[", " ".join(queries))
+
     def test_always_asks_about_down_targets(self) -> None:
         queries = dict(plan_queries({}))
         self.assertIn("targets_down", queries)
@@ -57,6 +69,26 @@ class CollectContextTests(unittest.TestCase):
         self.assertEqual(loki.queries, [])
         self.assertTrue(any("no deployment/pod label" in gap
                             for gap in context["missing"]))
+
+    def test_namespace_level_health_keeps_the_deployment_names(self) -> None:
+        """The value has to carry the name, or the query adds nothing.
+
+        `deployments_at_zero[namespace] = 0` would tell the model nothing it can
+        act on; `front-end=0` is what turns "the probe fails" into "this object
+        is scaled to zero".
+        """
+        class NamedPrometheus(FakePrometheus):
+            def query(self, expression: str) -> list:
+                self.queries.append(expression)
+                if "kube_deployment_spec_replicas" in expression:
+                    return [{"metric": {"deployment": "front-end"}, "value": "0"}]
+                return []
+
+        context = collect_context(
+            {"labels": {"namespace": "sock-shop", "alertname": "ProbeFailed"}},
+            make_settings(), NamedPrometheus(), FakeLoki([]))
+        self.assertEqual(context["prometheus"]["deployments_at_zero[namespace]"],
+                         "front-end=0")
 
     def test_empty_window_is_reported(self) -> None:
         context = collect_context(

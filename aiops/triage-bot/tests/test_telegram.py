@@ -71,6 +71,35 @@ class EscapingTests(unittest.TestCase):
         self.assertIn("ПРЕДЛОЖЕНИЕ ВНЕ WHITELIST", card)
         self.assertIn("не исполняется", card)
 
+    def test_card_leads_with_cause_then_facts_then_the_step(self) -> None:
+        """A human reads top to bottom, so the order is part of the contract.
+
+        The live stand once sent "нужен инженер" with no facts at all: the
+        decision was defensible, the card said nothing a human could use.
+        """
+        card = render_card(sample_incident())
+        self.assertLess(card.index("ПОЧЕМУ"), card.index("ЧТО УВИДЕЛ"))
+        self.assertLess(card.index("ЧТО УВИДЕЛ"), card.index("ЧТО СДЕЛАТЬ"))
+        self.assertIn("rolling restart", card)
+
+    def test_card_falls_back_to_the_runbook_and_shows_the_validator_note(self) -> None:
+        """Nothing executable? The rule's own runbook is still a concrete step.
+
+        And when the validator repaired the answer instead of rejecting it, the
+        card says so rather than passing the repair off as the model's own.
+        """
+        incident = sample_incident(
+            executable=False,
+            annotations={"summary": "probe failed",
+                         "runbook": "kubectl -n sock-shop get deploy,po"},
+            final={**sample_incident()["final"], "action_id": "escalate_human",
+                   "command": "", "proposal": "", "escalated": True,
+                   "validation_note": "params ignored: escalate_human takes none"})
+        card = render_card(incident)
+        self.assertIn("ЧТО ПРОВЕРИТЬ", card)
+        self.assertIn("kubectl -n sock-shop get deploy,po", card)
+        self.assertIn("валидатор: params ignored", card)
+
 
 class KeyboardTests(unittest.TestCase):
     def test_action_gets_three_buttons_including_approve(self) -> None:
@@ -85,31 +114,44 @@ class KeyboardTests(unittest.TestCase):
 
 
 class CardContentTests(unittest.TestCase):
-    def test_card_shows_both_tiers_when_both_answered(self) -> None:
+    def test_card_keeps_the_cascade_internals_out_of_the_message(self) -> None:
+        """Tier comparison is a quality measurement, not news for a human.
+
+        The first version printed both answers, their confidences and ids - three
+        lines a reader at 3 a.m. has to decode before the one sentence that
+        matters. The journal still keeps all of it.
+        """
         incident = sample_incident(tiers=[
             sample_incident()["tiers"][0],
             {"tier": "model", "adapter": "deepseek", "latency_ms": 4100,
              "decision": {"action_id": "escalate_human", "confidence": 0.72}},
         ], route_note="правила не дали уверенного ответа → подключена модель (deepseek)")
         card = render_card(incident)
-        self.assertIn("варианты", card)
-        self.assertIn("правила (tier 0)", card)
-        self.assertIn("модель (tier 1)", card)
-        self.assertIn("escalate_human", card)
-        self.assertIn("подключена модель", card)
+        self.assertNotIn("варианты", card)
+        self.assertNotIn("правила (tier 0)", card)
+        self.assertNotIn("решение:", card)
+        self.assertNotIn("подключена модель", card)
+        self.assertIn("AIOps: разбор инцидента", card)
 
-    def test_card_reports_context_and_gaps(self) -> None:
+    def test_card_prints_the_cost_but_not_the_bookkeeping(self) -> None:
+        incident = sample_incident(final={
+            **sample_incident()["final"], "total_tokens": 812})
+        card = render_card(incident)
+        self.assertIn("812 токенов", card)
+        self.assertNotIn("контекст:", card)
+
+    def test_card_explains_what_data_was_missing(self) -> None:
         incident = sample_incident(missing=["loki: no log lines in the window"])
         card = render_card(incident)
-        self.assertIn("контекст: loki, prometheus", card)
-        self.assertIn("пробелы", card)
+        self.assertIn("не хватило данных", card)
         self.assertIn("no log lines", card)
+        self.assertNotIn("пробелы", card)
 
     def test_card_keeps_its_html_tags_balanced(self) -> None:
         # Telegram rejects an unbalanced subset of HTML, so the tags the card
         # opens have to be closed - easy to check, expensive to discover live.
         card = render_card(sample_incident())
-        for tag in ("b", "i", "code"):
+        for tag in ("b", "i", "code", "pre", "blockquote"):
             self.assertEqual(card.count(f"<{tag}>"), card.count(f"</{tag}>"), tag)
 
 

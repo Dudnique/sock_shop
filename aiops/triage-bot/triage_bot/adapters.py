@@ -51,6 +51,16 @@ class Adapter:
         """Return the model's raw answer as text (validated by the caller)."""
         raise NotImplementedError
 
+    def answer(self, system: str, user: str) -> ModelAnswer:
+        """Free-text follow-up: shown to a human, executed by nobody.
+
+        Separate from `decide` on purpose. The text is not parsed, not validated
+        against the whitelist and cannot become an action, so it must not travel
+        through the decision schema at all - an answer that *looked* like a
+        decision but skipped validation would be the worst of both worlds.
+        """
+        raise NotImplementedError
+
 
 class MockAdapter(Adapter):
     """Tier 0: deterministic, offline, evidence-driven (the runbook in code)."""
@@ -136,6 +146,20 @@ class MockAdapter(Adapter):
             usage={},
         )
 
+    def answer(self, system: str, user: str) -> ModelAnswer:
+        """Tier 0 has no prose to offer: say so instead of inventing advice."""
+        return ModelAnswer(
+            text=("Оффлайн-режим (mock): подробный разбор доступен только с моделью.\n"
+                  "Что проверить руками:\n"
+                  "1. kubectl -n sock-shop get deploy,po,ep -o wide\n"
+                  "2. kubectl -n sock-shop describe deploy/<service>\n"
+                  "3. в Loki: {namespace=\"sock-shop\", service=\"<service>\"}"),
+            adapter=self.name,
+            model=self.settings.model_name,
+            latency_ms=0,
+            usage={},
+        )
+
     def decision_for(self, alert: dict, context: dict) -> dict:
         """The tier-0 decision for one alert: template + live evidence."""
         labels = alert.get("labels") or {}
@@ -144,6 +168,29 @@ class MockAdapter(Adapter):
         deployment = (labels.get("deployment") or labels.get("deployment_name") or "")
         action_id, confidence, reason = self.RULES.get(alertname, self.DEFAULT)
         evidence = self._evidence(context)
+
+        # The rule fires on `available == 0`, which is also how "somebody scaled
+        # the Deployment to zero" is caught. The generic premise check below
+        # compares available with desired and would call 0 >= 0 "already as
+        # desired" - the exact opposite of the truth, and the live stand shipped
+        # that sentence to Telegram while the site was down. So this case is
+        # named for what it is, and the confidence stays below the threshold on
+        # purpose: the fix is a scale, which the tier-0 table does not have, so
+        # the cascade (or a human) has to decide.
+        if alertname == "DeploymentReplicasUnavailable":
+            available = self._value(context, "replicas_available")
+            desired = self._value(context, "replicas_desired")
+            if available is not None and available == 0 and desired == 0:
+                return {
+                    "action_id": "escalate_human",
+                    "confidence": 0.5,
+                    "reason": (
+                        f"Деплоймент {deployment} масштабирован до нуля "
+                        "(desired=0, available=0): подов нет, поэтому сервис не "
+                        "отвечает и проба падает. Rolling restart ничего не "
+                        "создаст - нужен scale до ненулевого числа реплик."),
+                    "evidence": evidence,
+                }
 
         # The alert says what is wrong; the metrics say whether that is still
         # true. When the two disagree, the alert loses: an automated step taken
@@ -294,26 +341,29 @@ class OpenAICompatibleAdapter(Adapter):
             raise AdapterError(
                 f"{self.name}: response is not JSON: {body[:200]!r}") from exc
 
-    def decide(self, system: str, user: str, alert: dict, context: dict) -> ModelAnswer:
-        payload = {
-            "model": self.model,
-            "temperature": self.settings.llm_temperature,
-            "max_tokens": self.settings.llm_max_tokens,
-            "response_format": {"type": "json_object"},
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-        }
+    def _messages(self, system: str, user: str) -> list:
+        return [{"role": "system", "content": system},
+                {"role": "user", "content": user}]
+
+    def _complete(self, payload: dict, json_mode: bool) -> tuple[dict, int]:
+        """One request, with the single fallback this project has measured.
+
+        Some OpenAI-compatible gateways answer 400 to `response_format`. That
+        retry is what makes "any OpenAI-compatible gateway" true rather than a
+        claim - and only a JSON request ever needs it.
+        """
         started = time.time()
         try:
             data = self._post(payload)
         except AdapterError as exc:
-            if "response_format" not in str(exc):
+            if not json_mode or "response_format" not in str(exc):
                 raise
             log.warning("%s does not know response_format - retrying without it", self.name)
-            payload.pop("response_format")
+            payload.pop("response_format", None)
             data = self._post(payload)
-        latency_ms = int((time.time() - started) * 1000)
+        return data, int((time.time() - started) * 1000)
 
+    def _answer_from(self, data: dict, latency_ms: int) -> ModelAnswer:
         choices = data.get("choices") or []
         if not choices:
             raise AdapterError(f"{self.name}: no choices in the response")
@@ -323,6 +373,33 @@ class OpenAICompatibleAdapter(Adapter):
             raise AdapterError(f"{self.name}: empty message content")
         return ModelAnswer(text=content, adapter=self.name, model=self.model,
                            latency_ms=latency_ms, usage=data.get("usage") or {})
+
+    def decide(self, system: str, user: str, alert: dict, context: dict) -> ModelAnswer:
+        payload = {
+            "model": self.model,
+            "temperature": self.settings.llm_temperature,
+            "max_tokens": self.settings.llm_max_tokens,
+            "response_format": {"type": "json_object"},
+            "messages": self._messages(system, user),
+        }
+        data, latency_ms = self._complete(payload, json_mode=True)
+        return self._answer_from(data, latency_ms)
+
+    def answer(self, system: str, user: str) -> ModelAnswer:
+        """Prose for a human: no response_format, no schema, no action.
+
+        `response_format` is deliberately absent here. Asking for JSON and then
+        rendering that JSON as advice is how a follow-up ends up looking like a
+        decision to somebody who is skimming the chat.
+        """
+        payload = {
+            "model": self.model,
+            "temperature": self.settings.llm_temperature,
+            "max_tokens": self.settings.llm_max_tokens,
+            "messages": self._messages(system, user),
+        }
+        data, latency_ms = self._complete(payload, json_mode=False)
+        return self._answer_from(data, latency_ms)
 
 
 def build_adapter(settings: Settings) -> Adapter:

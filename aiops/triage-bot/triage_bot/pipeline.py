@@ -125,7 +125,9 @@ class TriagePipeline:
             payload = model_mod.parse_decision_json(answer.text)
             decision = model_mod.validate_decision(
                 payload, self.settings, adapter=answer.adapter, model=answer.model)
-            note = ""
+            # Whatever the validator tolerated (e.g. params dropped next to an
+            # escalation) travels with the decision and is shown on the card.
+            note = decision.validation_note
         except model_mod.DecisionError as exc:
             # A rejection is data: it counts, it is visible, and it escalates.
             self.metrics.inc("aiops_schema_violations", kind=exc.kind)

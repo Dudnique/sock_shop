@@ -89,6 +89,23 @@ class MockAdapterTests(unittest.TestCase):
             alert(), {"prometheus": {}, "loki": [], "missing": []})
         self.assertEqual(payload["action_id"], "restart_deployment")
 
+    def test_a_deployment_scaled_to_zero_is_named_not_called_healthy(self) -> None:
+        """0 available out of 0 desired is an outage, not "already as desired".
+
+        The generic premise check compared the two numbers and declared the
+        Deployment healthy while the site was down - the live stand sent exactly
+        that sentence to Telegram. The case is now named for what it is, and the
+        confidence stays below the threshold so the cascade (or a human) decides.
+        """
+        zero = {"prometheus": {"replicas_available[front-end]": "0",
+                               "replicas_desired[front-end]": "0"},
+                "loki": [], "missing": []}
+        payload = self.adapter.decision_for(alert(), zero)
+        self.assertEqual(payload["action_id"], "escalate_human")
+        self.assertEqual(payload["confidence"], 0.5)
+        self.assertIn("масштабирован до нуля", payload["reason"])
+        self.assertIn("replicas_available[front-end] = 0", payload["evidence"])
+
     def test_premise_checks_point_at_real_tier0_decisions(self) -> None:
         for name in MockAdapter.PREMISES:
             self.assertIn(name, MockAdapter.RULES, name)

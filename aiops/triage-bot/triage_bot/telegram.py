@@ -35,16 +35,25 @@ log = logging.getLogger("aiops.telegram")
 API_BASE = "https://api.telegram.org"
 
 #: Decisions a human can press. `approve` is only offered for whitelist actions.
+#: The labels say what actually happens in M1 - an earlier "только совет" promised
+#: advice and only wrote a journal line, which is exactly the kind of label a
+#: human stops trusting.
 DECISIONS = {
-    "approve": "применить (план M1)",
-    "advice": "только совет",
-    "ignore": "игнор 4 ч",
+    "approve": "✅ применить (план M1)",
+    "advice": "📝 без действий",
+    "ignore": "🔇 не беспокоить 4 ч",
 }
 
 
 def esc(value) -> str:
     """Escape for Telegram's HTML parse mode (quotes included, like any HTML)."""
     return html.escape(str(value), quote=True)
+
+
+def short(value, limit: int = 160) -> str:
+    """One evidence line stays one line: a card, not a log dump."""
+    text = str(value).strip()
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
 class TelegramError(RuntimeError):
@@ -199,66 +208,74 @@ def build_keyboard(incident_id: str, executable: bool) -> list:
     return [row]
 
 
-_TIER_NAMES = {"rules": "правила (tier 0)", "model": "модель (tier 1)"}
-
-
 def render_card(incident: dict) -> str:
-    """The message a human receives: what fired, what was decided, why, cost."""
+    """The message a human receives: cause -> facts -> what to do -> cost.
+
+    The order is the point. The stand once sent "нужен инженер" with no facts:
+    the decision was right and the card was useless. So the cause comes first,
+    the evidence it rests on second, and only then the step - a whitelisted
+    command, a free-text proposal, or the alert's own runbook when nothing may
+    be executed. The bot's own bookkeeping is one compact footer line.
+    """
     labels = incident.get("labels") or {}
     annotations = incident.get("annotations") or {}
+    final = incident.get("final") or {}
+
+    # A distinct opening line on purpose: this card lands in the same chat as
+    # Alertmanager's own plain `[FIRING] ...` messages, and a human scanning the
+    # chat has to see at a glance which message carries the analysis.
     lines = [
-        f"🔥 <b>{esc(incident.get('alertname', '?'))}</b>"
-        f" [{esc(labels.get('severity', '?'))}] · <code>{esc(incident.get('id', ''))}</code>",
+        f"🤖 <b>AIOps: разбор инцидента</b> · <code>#{esc(incident.get('id', ''))}</code>",
+        "",
+        f"🔥 <b>{esc(incident.get('alertname', '?'))}</b> · {esc(labels.get('severity', '?'))}",
     ]
-    scope = [f"{key}=<code>{esc(labels[key])}</code>"
+    scope = [f"{key} <code>{esc(labels[key])}</code>"
              for key in ("namespace", "deployment", "pod", "node")
              if labels.get(key)]
     if scope:
         lines.append(" · ".join(scope))
     if annotations.get("summary"):
-        lines.append(esc(annotations["summary"]))
-
-    tiers = incident.get("tiers") or []
-    if len(tiers) > 1:
-        lines.append("\n<b>варианты:</b>")
-        for tier in tiers:
-            decision = tier.get("decision") or {}
-            lines.append(
-                f"• {esc(_TIER_NAMES.get(tier.get('tier'), tier.get('tier', '?')))}"
-                f" — <code>{esc(decision.get('action_id', '?'))}</code>"
-                f" {esc(decision.get('confidence', '?'))}"
-                f" ({esc(tier.get('adapter', ''))}, {esc(tier.get('latency_ms', 0))} мс)")
-
-    final = incident.get("final") or {}
-    lines.append(f"\n<b>итог:</b> <code>{esc(final.get('action_id', '?'))}</code>"
-                 f" · уверенность {esc(final.get('confidence', '?'))}"
-                 f" · ответил: {esc(final.get('adapter', '?'))}")
-    if incident.get("route_note"):
-        lines.append(f"<i>{esc(incident['route_note'])}</i>")
+        lines.append(f"<i>{esc(annotations['summary'])}</i>")
 
     if final.get("reason"):
-        lines.append(f"\n<b>почему:</b> {esc(final['reason'])}")
+        # A quoted block, not just a bold word: Telegram draws a vertical bar,
+        # so the cause stands out instead of blending into one wall of text.
+        lines += ["", "<b>ПОЧЕМУ</b>", f"<blockquote>{esc(final['reason'])}</blockquote>"]
 
     evidence = final.get("evidence") or []
     if evidence:
-        lines.append("\n<b>доказательства:</b>")
-        lines.extend(f"• {esc(item)}" for item in evidence[:6])
+        lines += ["", "<b>ЧТО УВИДЕЛ</b>"]
+        lines.extend(f"• {esc(short(item))}" for item in evidence[:6])
 
     command = final.get("command") or ""
     if command:
-        lines.append(f"\n<b>команда (M1 не исполняет):</b>\n<code>{esc(command)}</code>")
+        lines += ["", "<b>ЧТО СДЕЛАТЬ</b>", f"<pre>{esc(command)}</pre>",
+                  "<i>M1 команду не исполняет: это шаг для человека.</i>"]
     if final.get("proposal"):
-        lines.append("\n⚠️ <b>ПРЕДЛОЖЕНИЕ ВНЕ WHITELIST (не исполняется, "
-                     "нужен инженер):</b>")
-        lines.append(esc(final["proposal"]))
+        lines += ["", "⚠️ <b>ПРЕДЛОЖЕНИЕ ВНЕ WHITELIST</b>",
+                  "<i>не исполняется, нужен инженер</i>",
+                  f"<blockquote>{esc(final['proposal'])}</blockquote>"]
+    # When nothing is executable, the rule's own runbook is the most concrete
+    # thing that can be put in front of a human - and the bot did not invent it.
+    if annotations.get("runbook") and not command:
+        lines += ["", "<b>ЧТО ПРОВЕРИТЬ</b>",
+                  f"<pre>{esc(annotations['runbook'])}</pre>"]
 
-    sources = incident.get("sources") or []
-    missing = incident.get("missing") or []
-    footer = [f"контекст: {esc(', '.join(sources) if sources else 'нет')}"]
-    if missing:
-        footer.append(f"пробелы: {esc('; '.join(str(m) for m in missing[:2]))}")
+    # Only what a reader needs in order to judge the answer: who answered and
+    # what it cost. The tier-by-tier comparison stays in the journal - it is a
+    # quality measurement, not something a person should read at 3 a.m.
+    meta = [esc(final.get("adapter") or "?")]
     tokens = final.get("total_tokens")
     if tokens:
-        footer.append(f"токенов: {esc(tokens)}")
-    lines.append("\n<i>" + " · ".join(footer) + "</i>")
+        meta.append(f"{esc(tokens)} токенов")
+    lines += ["", f"<i>{' · '.join(meta)}</i>"]
+
+    missing = incident.get("missing") or []
+    if missing:
+        lines.append("<i>⚠️ не хватило данных: "
+                     f"{esc('; '.join(short(item, 90) for item in missing[:2]))}</i>")
+    if final.get("validation_note"):
+        # Tolerated, not hidden: the reader can see that the bot repaired the
+        # answer instead of trusting it.
+        lines.append(f"<i>валидатор: {esc(final['validation_note'])}</i>")
     return "\n".join(lines)

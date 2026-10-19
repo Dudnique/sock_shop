@@ -101,16 +101,23 @@ Answer with ONE JSON object and nothing else - no prose, no markdown fences:
 
 Rules:
 - action_id MUST be one of: {action_ids}.
-- Use escalate_human whenever evidence is missing, contradictory or the safe
-  action is not obvious. Escalation is a correct answer, not a failure.
+- reason MUST name the likely cause and the chain that leads to it: what the
+  alert says -> what the evidence shows -> which object is broken and why the
+  service fails. "Something is wrong, an engineer should look" is not a reason;
+  write it for a person who has 30 seconds and cannot see this prompt.
 - evidence MUST quote facts from the supplied context (metric values, log
   lines, replica counts). Never invent a metric, a log line or a service name.
-- params are required only for the actions that need them, and namespace must be
-  sock-shop. Do not add any other keys.
-- If none of the allowed actions fits, answer escalate_human AND put the fix you
-  would suggest into "proposal" (plain text, at most 2 sentences). "proposal" is
-  allowed only together with escalate_human: it is shown to a human, it is never
-  executed, and a proposal attached to an action is rejected outright.
+  If the context names no object, say so instead of guessing a name.
+- Use escalate_human whenever evidence is missing, contradictory or the safe
+  action is not obvious. Escalation is a correct answer, not a failure: its
+  reason still names the cause, and its "proposal" carries the concrete next
+  step - including the exact kubectl command when you can tell which object and
+  which fix are meant. A human reads the proposal; nothing executes it.
+- params belong only to the actions that take them: never send params together
+  with escalate_human. They are dropped, and the note makes the report worse.
+- namespace must be sock-shop. Do not add any other keys.
+- "proposal" is allowed only together with escalate_human: it is shown to a
+  human, it is never executed, and a proposal attached to an action is rejected.
 - You cannot run anything. A human approves every action."""
 
 
@@ -133,6 +140,10 @@ class Decision:
     model: str = ""
     escalated: bool = False
     escalation_reason: str = ""
+    #: What the validator changed or tolerated, shown on the card. A note is not
+    #: an error: it records e.g. params dropped next to an escalation, so the
+    #: bot never quietly repairs a model's answer.
+    validation_note: str = ""
     raw: dict = field(default_factory=dict)
 
     @property
@@ -152,6 +163,7 @@ class Decision:
             "model": self.model,
             "escalated": self.escalated,
             "escalation_reason": self.escalation_reason,
+            "validation_note": self.validation_note,
         }
 
 
@@ -208,19 +220,28 @@ def build_user_prompt(alert: dict, context: dict) -> str:
 
 
 def escalate(reason: str, adapter: str = "", model: str = "",
-             raw: dict | None = None, proposal: str = "") -> Decision:
-    """The safe default: a human gets the incident, nothing else happens."""
+             raw: dict | None = None, proposal: str = "",
+             evidence: list | None = None, confidence: float = 0.0,
+             note: str = "") -> Decision:
+    """The safe default: a human gets the incident, nothing else happens.
+
+    `evidence` and `confidence` are carried through on purpose. The live stand
+    once sent a card that said "нужен инженер" and nothing else: the decision was
+    right, but the facts it rested on had already been collected and were thrown
+    away right here. An escalation is a report, not an apology.
+    """
     return Decision(
         action_id="escalate_human",
-        confidence=0.0,
+        confidence=confidence,
         reason=reason,
-        evidence=[],
+        evidence=list(evidence or []),
         params={},
         proposal=proposal,
         adapter=adapter,
         model=model,
         escalated=True,
         escalation_reason=reason,
+        validation_note=note,
         raw=raw or {},
     )
 
@@ -325,7 +346,16 @@ def validate_decision(payload: dict, settings, adapter: str = "",
         raise DecisionError("schema", "evidence entries must not be empty")
     clean_evidence = clean_evidence[:settings.max_evidence_items]
 
-    params = validate_params(spec, payload.get("params") or {}, settings)
+    # `escalate_human` executes nothing, so params next to it cannot cause harm -
+    # but rejecting the whole answer (M1 did, and a live DeepSeek answer hit it)
+    # replaced the model's cause and proposal with a validator error on the card.
+    # The params are dropped, and the fact is stated in `validation_note`.
+    note = ""
+    raw_params = payload.get("params") or {}
+    if spec.is_escalation and raw_params:
+        note = "params ignored: escalate_human takes none"
+        raw_params = {}
+    params = validate_params(spec, raw_params, settings)
 
     proposal = payload.get("proposal") or ""
     if proposal:
@@ -347,8 +377,11 @@ def validate_decision(payload: dict, settings, adapter: str = "",
             f"{settings.confidence_threshold:.2f} - a human decides")
 
     if spec.is_escalation:
+        # Keep the facts and the confidence: the escalation is the report, and a
+        # report without evidence is what this card used to be.
         return escalate(reason, adapter=adapter, model=model, raw=payload,
-                        proposal=proposal)
+                        proposal=proposal, evidence=clean_evidence,
+                        confidence=confidence, note=note)
 
     return Decision(
         action_id=action_id,
