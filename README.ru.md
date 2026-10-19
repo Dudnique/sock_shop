@@ -40,7 +40,7 @@ kubectl version --client
 .\deploy.ps1
 ```
 
-Скрипт — тонкий оркестратор, он делает **восемь** шагов плюс необязательный девятый:
+Скрипт — тонкий оркестратор, он делает **восемь** шагов плюс два необязательных:
 
 1. поднимает кластер k3d через **Terraform** (`terraform/k3d`) — единственный
    источник правды про инфраструктуру;
@@ -65,7 +65,15 @@ kubectl version --client
    Тихая дыра в мониторинге хуже упавшего деплоя, поэтому невалидный файл прерывает скрипт;
 8. применяет стек алертинга (`deploy/kubernetes/manifests-alerting`) и его секреты;
 9. *(необязательно, `-WithLoadtest`)* применяет генератор нагрузки
-   (`deploy/kubernetes/manifests-loadtest`).
+   (`deploy/kubernetes/manifests-loadtest`);
+10. *(необязательно, `-WithAIOps`)* разворачивает **AIOps-триаж-бот** (`aiops/triage-bot`):
+    собирает образ `triage-bot:0.1.0-m1`, импортирует его в ноду k3d (`k3d image import` — образ
+    нигде не опубликован, и именно поэтому в Deployment стоит
+    `imagePullPolicy: IfNotPresent`), создаёт опциональный Secret `aiops-llm`, если доступен
+    `DEEPSEEK_API_KEY`, применяет `deploy/kubernetes/manifests-aiops` и ждёт окончания rollout.
+    Бот разбирает алерты с меткой `aiops="true"`, которые ему шлёт Alertmanager, и отвечает
+    карточкой в Telegram; у него нет ни токена сервис-аккаунта, ни RBAC, ни `kubectl`, а в M1 он
+    ничего не исполняет (`FIXES.md` §16).
 
 После этого магазин откроется по адресу **http://localhost:8080**.
 
@@ -74,6 +82,13 @@ kubectl version --client
 
 ```powershell
 .\deploy.ps1 -WithLoadtest
+```
+
+Поставить AIOps-бота на тот же стенд (ему нужен стек алертинга, а ключ модели он берёт из того же
+`deploy\secrets.local.ps1`):
+
+```powershell
+.\deploy.ps1 -WithAIOps
 ```
 
 
@@ -160,6 +175,24 @@ kubectl apply -f deploy\kubernetes\manifests-alerting
 # 9. (необязательно) генератор нагрузки — без трафика дашборды пустые,
 #    а правилам алертов не на чем срабатывать
 kubectl apply -f deploy\kubernetes\manifests-loadtest
+
+# 10. (необязательно) AIOps-триаж-бот. Образ собирается здесь и не опубликован
+#     нигде, поэтому `imagePullPolicy: IfNotPresent` в Deployment — не пожелание:
+#     с `Always` kubelet пошёл бы за ним в Docker Hub и под не стартовал бы.
+docker build -t triage-bot:0.1.0-m1 aiops\triage-bot
+k3d image import triage-bot:0.1.0-m1 -c sock-shop
+#     Ключ модели опционален (`optional: true` на монтировании): без него каскад
+#     откатывается на таблицу правил, а /healthz говорит, какого файла ключа нет.
+. .\deploy\secrets.local.ps1
+kubectl -n monitoring create secret generic aiops-llm `
+    --from-literal=deepseek_api_key=$env:DEEPSEEK_API_KEY `
+    --dry-run=client -o yaml | kubectl apply -f -
+#     Никогда `examples\`: `kubectl apply -f <dir>` не рекурсивный, и именно это
+#     не даёт каталогу `manifests-aiops\examples\` попасть в кластер.
+kubectl apply -f deploy\kubernetes\manifests-aiops
+kubectl -n monitoring rollout status deploy/triage-bot --timeout=90s
+kubectl -n monitoring port-forward svc/triage-bot 8080:8080
+#     затем: curl http://localhost:8080/healthz
 ```
 
 Приложение можно применить и из одного файла:
@@ -256,6 +289,8 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 ├── deploy.ps1                              # развёртывание в одну команду (Terraform + kubectl)
 ├── FIXES.md                                # что исправлено и почему (EN)
 ├── FIXES.ru.md                             # что исправлено и почему (RU)
+├── aiops/
+│   └── triage-bot/                         # AIOps-советник M1: код, 94 теста, run-local.ps1
 ├── deploy/
 │   └── kubernetes/
 │       ├── manifests/                      # приложение, пофайлово (00 ... 29)
@@ -265,6 +300,7 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 │       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
 │       ├── manifests-loadtest/             # опциональный генератор нагрузки (locust)
 │       ├── manifests-policy/               # сетевые политики: default-deny + разрешения по сервисам
+│       ├── manifests-aiops/                # AIOps-триаж-бот (M1): ConfigMap, Deployment, Service, NetworkPolicy
 │       ├── autoscaling/                    # HPA v2 для stateless-сервисов (+ legacy/)
 │       ├── complete-demo.yaml              # приложение одним файлом
 │       └── helm-chart/                     # альтернатива: Helm-чарт
@@ -285,6 +321,33 @@ k3d cluster stop sock-shop     # остановить
 k3d cluster start sock-shop    # запустить снова
 k3d cluster delete sock-shop   # удалить полностью
 ```
+
+Если стенд не возвращается — `kubectl` уходит в таймаут, `docker ps` висит, машина тормозит — не надо
+чинить это на месте. `deploy\diagnose-stand.ps1` различает три отказа, которые выглядят одинаково как
+«не подключается»: зависший движок Docker, трэшинг ВМ WSL или больной кластер. Скрипт read-only и для
+найденного случая печатает следующую команду.
+
+Зависшая ВМ убивается через `wsl --shutdown` (`docker stop` в этом состоянии тоже висит). Кластер,
+который не восстанавливается, заменяется: `.\deploy.ps1 -Down`, затем `.\deploy.ps1 -WithAIOps`.
+
+То, что стенд накапливает за время работы, — отдельная проблема, и пересборки она не требует. На
+томах не лежит ничего: Prometheus, Loki и журнал бота используют `emptyDir`, а бот читает только
+последние 15 минут логов, поэтому растёт то, что никто не просил: чанки логов, блоки TSDB, слои
+образов в containerd и завершённые поды.
+
+```powershell
+.\deploy\cleanup-stand.ps1                  # ~30 с: завершённые поды, неиспользуемые образы, данные Loki/Prometheus
+.\deploy\cleanup-stand.ps1 -KeepPrometheus  # сохранить историю метрик
+.\deploy\cleanup-stand.ps1 -KeepLogs        # сохранить чанки логов
+.\deploy\cleanup-stand.ps1 -DryRun          # показать, что будет удалено
+```
+
+Скрипт печатает занятое место и число образов на каждой ноде до и после, так что рост измеряется, а не
+угадывается; приложение, Secret'ы и бота он не трогает.
+
+Это мера только для стенда, а не продовый паттерн: на реальном кластере ответ — лимиты ресурсов,
+настоящие тома, retention и алерты на запас памяти. Разбор и таблица соответствий — в `FIXES.md`,
+раздел 17.
 
 ## Лицензия
 

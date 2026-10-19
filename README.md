@@ -39,7 +39,7 @@ kubectl version --client
 .\deploy.ps1
 ```
 
-The script is a thin orchestrator and does **eight** things, plus an optional ninth:
+The script is a thin orchestrator and does **eight** things, plus two optional extras:
 
 1. provisions the k3d cluster with **Terraform** (`terraform/k3d`) - the single
    source of truth for the infrastructure;
@@ -63,7 +63,14 @@ The script is a thin orchestrator and does **eight** things, plus an optional ni
    fatal - it logs an error and keeps serving requests **without those alerts**. A silent
    monitoring gap is worse than a failed deployment, so an invalid file aborts the script;
 8. applies the alerting stack (`deploy/kubernetes/manifests-alerting`) plus its secrets;
-9. *(optional, `-WithLoadtest`)* applies the load generator (`deploy/kubernetes/manifests-loadtest`).
+9. *(optional, `-WithLoadtest`)* applies the load generator (`deploy/kubernetes/manifests-loadtest`);
+10. *(optional, `-WithAIOps`)* deploys the **AIOps triage bot** (`aiops/triage-bot`): builds the
+    image `triage-bot:0.1.0-m1`, imports it into the k3d node (`k3d image import` - it is published
+    nowhere, which is exactly why the Deployment uses `imagePullPolicy: IfNotPresent`), creates the
+    optional `aiops-llm` Secret when `DEEPSEEK_API_KEY` is available, applies
+    `deploy/kubernetes/manifests-aiops` and waits for the rollout. The bot triages the `aiops="true"`
+    alerts that Alertmanager POSTs to it and answers with a Telegram card; it holds no
+    service-account token, no RBAC and no `kubectl`, and in M1 it executes nothing (`FIXES.md` §16).
 
 The shop then opens at **http://localhost:8080**.
 
@@ -72,6 +79,13 @@ and traces non-empty, so it is the recommended way to run a demo:
 
 ```powershell
 .\deploy.ps1 -WithLoadtest
+```
+
+Put the AIOps bot on the same stand (it needs the alerting stack, and takes the optional model key
+from the very same `deploy\secrets.local.ps1`):
+
+```powershell
+.\deploy.ps1 -WithAIOps
 ```
 
 
@@ -159,6 +173,24 @@ kubectl apply -f deploy\kubernetes\manifests-alerting
 # 9. (optional) load generator - without traffic the dashboards stay empty and the
 #    alert rules have nothing to fire on
 kubectl apply -f deploy\kubernetes\manifests-loadtest
+
+# 10. (optional) AIOps triage bot. The image is built here and published nowhere, so
+#     `imagePullPolicy: IfNotPresent` in the Deployment is not a preference: with
+#     `Always` the kubelet would go to Docker Hub for it and the pod would never start.
+docker build -t triage-bot:0.1.0-m1 aiops\triage-bot
+k3d image import triage-bot:0.1.0-m1 -c sock-shop
+#     The model key is optional (`optional: true` on the mount): without it the
+#     cascade falls back to the ruleset and /healthz says which key file is missing.
+. .\deploy\secrets.local.ps1
+kubectl -n monitoring create secret generic aiops-llm `
+    --from-literal=deepseek_api_key=$env:DEEPSEEK_API_KEY `
+    --dry-run=client -o yaml | kubectl apply -f -
+#     Never `examples\`: `kubectl apply -f <dir>` is not recursive, and that is exactly
+#     what keeps `manifests-aiops\examples\` out of the cluster.
+kubectl apply -f deploy\kubernetes\manifests-aiops
+kubectl -n monitoring rollout status deploy/triage-bot --timeout=90s
+kubectl -n monitoring port-forward svc/triage-bot 8080:8080
+#     then: curl http://localhost:8080/healthz
 ```
 
 The application can also be applied from a single file:
@@ -255,6 +287,8 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 ├── deploy.ps1                              # one-command deployment (Terraform + kubectl)
 ├── FIXES.md                                # what was fixed and why (EN)
 ├── FIXES.ru.md                             # what was fixed and why (RU)
+├── aiops/
+│   └── triage-bot/                         # AIOps M1 advisor: code, 94 tests, run-local.ps1
 ├── deploy/
 │   └── kubernetes/
 │       ├── manifests/                      # application, per-file (00 ... 29)
@@ -264,6 +298,7 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 │       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
 │       ├── manifests-loadtest/             # optional locust load generator
 │       ├── manifests-policy/               # NetworkPolicy: default-deny + per-service allows
+│       ├── manifests-aiops/                # AIOps triage bot (M1): ConfigMap, Deployment, Service, NetworkPolicy
 │       ├── autoscaling/                    # HPA v2 for the stateless services (+ legacy/)
 │       ├── complete-demo.yaml              # application in one file
 │       └── helm-chart/                     # alternative: Helm chart
@@ -284,6 +319,33 @@ k3d cluster stop sock-shop     # stop
 k3d cluster start sock-shop    # start again
 k3d cluster delete sock-shop   # remove entirely
 ```
+
+If the stand does not come back - `kubectl` times out, `docker ps` hangs, the machine is slow - do
+not debug it in place. `deploy\diagnose-stand.ps1` tells apart the three failures that all look like
+"cannot connect": the Docker engine is wedged, the WSL VM is thrashing, or the cluster is unhealthy.
+It is read-only and prints the next command for whichever one it finds.
+
+A wedged VM is killed with `wsl --shutdown` (`docker stop` hangs in that state). A cluster that will
+not recover is replaced with `.\deploy.ps1 -Down` followed by `.\deploy.ps1 -WithAIOps`.
+
+What the stand accumulates while it runs is a different problem, and it does not need a rebuild.
+Nothing is stored on a volume - Prometheus, Loki and the bot's journal all use `emptyDir` - and the
+bot only ever reads the last 15 minutes of logs, so what grows is data nobody asked for: log chunks,
+TSDB blocks, containerd image layers and finished pods.
+
+```powershell
+.\deploy\cleanup-stand.ps1                  # ~30 s: finished pods, unused images, Loki/Prometheus data
+.\deploy\cleanup-stand.ps1 -KeepPrometheus  # keep the metric history
+.\deploy\cleanup-stand.ps1 -KeepLogs        # keep the log chunks
+.\deploy\cleanup-stand.ps1 -DryRun          # print what would be removed
+```
+
+It reports disk usage and image counts per node before and after, so growth is measured rather than
+guessed, and it leaves the application, the Secrets and the bot alone.
+
+That is a stand-only measure, not a production pattern: on a real cluster the answer is resource
+limits, real volumes, retention and alerting on memory headroom. `FIXES.md`, section 17 has the
+analysis and the mapping.
 
 ## License
 

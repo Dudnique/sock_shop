@@ -78,6 +78,29 @@ A plain `terraform apply` fails on that change, and since the same apply also re
 generated kubeconfig file (destroy, then create), the failure leaves you **without a
 kubeconfig**. `deploy.ps1` now stops on terraform's non-zero exit instead of carrying on.
 
+## Recreating a stand that will not come back
+
+The cluster is disposable: `deploy.ps1 -Down` removes it with `terraform destroy`, and the next
+`deploy.ps1` recreates it from this configuration. That is the first thing to try when Docker
+Desktop's VM has been through an unclean shutdown and `kubectl` times out: a fresh cluster starts at
+load ~0.5 under the same 7.5 GB WSL limit, while the old one (three days of containerd snapshots,
+Prometheus TSDB and Loki chunks) does not.
+
+```powershell
+.\deploy.ps1 -Down           # terraform destroy, ~20 s
+.\deploy.ps1 -WithAIOps      # terraform apply + the manifests, ~5 min
+```
+
+The kubeconfig this configuration writes (`~/.kube/sock-shop-k3d.yaml`, output `kubeconfig_path`) is
+replaced on every apply, so a rebuild also repairs a kubeconfig that points at an API port which no
+longer exists. What is lost is history - Prometheus data, Loki chunks and the bot's journal live
+inside the nodes - not configuration: everything that matters is in git.
+
+Before rebuilding, `deploy\diagnose-stand.ps1` tells the three failures apart that all look like
+"kubectl cannot connect": engine wedged, VM thrashing, cluster unhealthy. It is read-only and prints
+the next command for whichever one it finds. The full analysis of the incident, and the two
+`deploy.ps1` bugs the rebuild uncovered, are in `FIXES.md`, section 17.
+
 ## Layout
 
 | File | Purpose |

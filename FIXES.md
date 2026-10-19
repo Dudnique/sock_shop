@@ -708,3 +708,329 @@ The lesson worth keeping: the control *and* the deployment step were both missin
 one alone would have produced a false sense of security - a policy that is never applied and a
 policy that is applied but wrong look identical in a repository.
 
+---
+
+## 16. An AIOps triage bot, and the two bugs its first live run found
+
+This section is different from the others: the component is new rather than an upstream defect. It
+belongs in this file anyway, because both of its real bugs were found the way every other fix here
+was found - by running it against the live stand. The unit suite was green before and after each one.
+
+### What was added
+
+`aiops/triage-bot`: Alertmanager POSTs a firing alert, the bot collects read-only evidence from
+Prometheus and Loki, the cascade answers - a ruleset first, a model only when the ruleset is itself
+unsure - the answer is validated against a whitelist, and a Telegram card with **approve / advice /
+ignore** appears. Nothing is executed. Delivered with it:
+
+| Piece | Where |
+| ----- | ----- |
+| The bot: nine stdlib-only modules plus `run-local.ps1` and 94 tests | `aiops/triage-bot/` |
+| ConfigMap, Deployment, Service, NetworkPolicy | `deploy/kubernetes/manifests-aiops/` |
+| The Alertmanager route (`aiops-triage`, `continue: true`) | `manifests-alerting/alertmanager-configmap.yaml` |
+| One deploy switch: build, `k3d image import`, optional Secret, apply, wait | `.\deploy.ps1 -WithAIOps` |
+| A CI job that runs the suite, greps the guardrails and import-smokes the image | `.github/workflows/main.yaml` (`aiops-tests`) |
+| 15 contract checks between the YAML and the code | `tests/test_manifests.py` |
+
+"My bot cannot act" is stated in four independent places, so a mistake in one of them is not enough
+to break the boundary: the pod has `automountServiceAccountToken: false` and no `serviceAccountName`
+(nothing to authenticate with); there is no RBAC object anywhere in the directory (and CI fails if
+one appears); the image holds neither `kubectl` nor a client library nor a shell; and the action
+whitelist lives in `triage_bot/model.py`, not in the ConfigMap, with `TriagePipeline.execute()`
+raising `NotImplementedError` whose docstring is the M2 specification.
+
+### Bug 1: the Loki selector asked for a label that does not exist
+
+**Symptom.** A card for the front-end said `missing: loki: no log lines in the window` - while
+front-end was logging continuously.
+
+**Cause.** Loki's labels are cut by Promtail out of the *log file path* on the node
+(`manifests-logging/04-promtail-configmap.yaml`), so the label set is
+`container_name, filename, job, namespace, pod_name, stream`. The first version reused Prometheus
+names (`pod`, `deployment`), which Loki has no such label for. The query was valid, matched nothing,
+and came back empty.
+
+**Why it was invisible.** An empty answer is not an error. Prometheus handed over its metrics, Loki's
+`/query_range` answered `200` with `"result": []`, and the only trace of the defect was one word in a
+list the code fills in exactly so that silence stays visible. A response of the wrong shape would
+have failed loudly; this one failed politely.
+
+**Fix.** The selector uses `pod_name` / `container_name`, and the label names are pinned by
+`tests/test_context.py`. Measured on the live stand: `GET /loki/api/v1/labels` answers exactly
+`container_name, filename, job, namespace, pod_name, stream`, and sock-shop had **673,191 log lines
+over the last 6 hours** - the logs were always there.
+
+### Bug 2: tier 0 trusted the alert
+
+**Symptom.** A synthetic POST of `DeploymentReplicasUnavailable` describing a perfectly healthy
+front-end produced a confident `restart_deployment`.
+
+**Cause.** The ruleset keyed on `alertname` and checked nothing else, and the alert was the only
+input it ever verified. That inverts the job: the alert is a *claim* produced by a rule that can be
+stale, mislabelled or synthetic (all three were true here - the payload had just been written by
+hand). Acting on the claim without reading the series the claim was computed from is precisely the
+failure mode a first responder must not have.
+
+**Fix.** `MockAdapter.PREMISES` plus `_premise_conflict()`: for every answer whose alert has a
+premise, the value is re-read from the series it must come from (`replicas_available` against
+`replicas_desired`), and a contradiction turns the answer into an escalation that carries **both
+numbers**:
+
+```
+Алерт DeploymentReplicasUnavailable не подтверждается метриками
+(replicas_available=1 >= replicas_desired=1): состояние уже соответствует
+желаемому, автоматический шаг ничего не исправит - решение за человеком.
+```
+
+The asymmetry is the whole policy: only a **contradiction** stops the bot. A **missing** metric is
+not a conflict - silence must not block a safe step, or the bot would go inert on any stand with one
+broken exporter, which is worse than being wrong about a single alert.
+
+### Bug 3 (small): a health field that lied
+
+`/healthz` reported `model_tier_reason: "the provider has no base_url"` on a stand running
+`MODEL_ADAPTER=mock`, where nothing was missing at all. `mock` *is* the tier-0 ruleset, so the
+honest answer is an empty string. A misleading field in a health endpoint costs more than the three
+lines it takes to remove it, and the live run is what made it visible.
+
+### Verification
+
+| Check | Result |
+| ----- | ------ |
+| `python -m unittest discover -s tests -t . -v` | **94 tests, green**, no network, a few seconds |
+| `kubeconform -strict` over `manifests-aiops/` | 5/5 objects valid |
+| `amtool check-config alertmanager-configmap.yaml` | SUCCESS (the new `aiops-triage` route included) |
+| `run-local.ps1` against the live stand | one alert in, one card in Telegram, one incident in the journal |
+| `run-local.ps1 -Model deepseek -Alertname ProbeFailed -Fresh` | `deepseek-chat`, **1.64 s / 907 tokens**, then **1.85 s / 899 tokens** on a repeat run; the model answered `escalate_human` *with* `params`, the validator rejected it (`bad_params`) and kept the escalation |
+| the `совет` button | the callback recorded the human decision and the card's keyboard was cleared |
+| `kubectl -n monitoring get pods` | `triage-bot` `1/1 Running`, 0 restarts, no service-account token in the pod |
+
+What the live run proves that the suite cannot: the pydantic-free payload path survives a real
+Alertmanager (its `alerts` array, `fingerprint`, `status`, the `annotations` it actually sends), the
+Loki selectors match the labels Promtail really produces, the Prometheus queries return numbers
+rather than `"result": []`, the NetworkPolicy allows exactly the three conversations the bot needs,
+and the Telegram card renders without a parse error on real text. All five of those were wrong or
+unproven somewhere along the way.
+
+The live model run is worth reading on its own, because it produced the first real `bad_params`.
+Tier 0 escalated by its own confidence (0.60 against the 0.70 threshold - by design, not by
+failure), `deepseek-chat` was asked, and it answered `escalate_human` - the right action - with
+`deployment`, `namespace` and `replicas` attached to it. `escalate_human` is a param-less action,
+so the validator threw the answer away, kept the escalation and recorded why
+(`escalate_human needs exactly no params, got [...]`). Two runs, 1.6-1.9 s and ~900 tokens each,
+the same outcome. A model that is right about the action and wrong about its shape is exactly the
+case a schema check exists for: a reviewer who reads only `action_id` would have seen nothing wrong.
+
+### What this does not give you
+
+M1 is an advisor, and that is a deliberate stopping point rather than a limitation discovered late:
+
+- no execution and no Kubernetes access at all - events, node conditions and `describe` output are
+  not on the card but in `missing`, which is the honest version of the same thing;
+- one replica, a `Recreate` strategy and an `emptyDir` journal - the dedupe window and the audit
+  trail survive a process restart, not a pod restart;
+- no authentication on the webhook, as in the rest of the alerting stack: the NetworkPolicy is the
+  credential, and it is worth saying out loud rather than implying a token that is not there;
+- the ruleset knows only the alerts this stand fires, and a new alert is a new row plus a test that
+  fails first;
+- no eval set yet - `EVAL_MODE=1` measures a model against the ruleset on the live alerts, which is a
+  baseline, not a golden set of incidents with known causes.
+
+The lesson worth keeping: the suite of 94 tests passed before *and* after both bugs, and it would
+have passed forever. A green unit suite says the code does what its author meant; a live run is what
+asks whether the author meant the right thing. The two defects were also of the same shape - a
+component answering confidently from insufficient data - which is the failure mode this whole
+component was built to remove, committed first inside it.
+
+---
+
+## 17. A stand that would not come back, and the two deploy bugs the rebuild found
+
+Section 16 ends with a live run against a healthy stand. This one is about the day that stand
+refused to start. It is here because the first three explanations were wrong, and because the fix
+that finally worked uncovered two defects in `deploy.ps1` that had been sitting behind a deploy
+that looked green.
+
+### The symptom
+
+`docker ps` and `kubectl get nodes` both hung; sometimes `docker ps` answered `500 Internal Server
+Error` on the `dockerDesktopLinuxEngine` named pipe, sometimes `kubectl` gave `net/http: TLS
+handshake timeout`. `docker stop`, `docker exec` and `docker inspect` hung as well, and
+`wsl -d docker-desktop` began failing at the service level (`WsaETimeout`), so the VM could not
+even be inspected from inside.
+
+All four k3d containers were listed as `Up`. The k3s log was frozen. From the outside it looked
+like a k3d or Kubernetes problem, which is what made it expensive: k3d was fine.
+
+### What the measurements said
+
+| Layer | Measurement |
+| ----- | ----------- |
+| Host | 15.2 GB RAM, 49 GB free on `C:`, no `.wslconfig` - so the WSL VM gets ~7.5 GB |
+| VM | load average **577**, `Mem 7383/7554 MB`, **33 MB** available, swap 1562/2048, `57% sys / 18% io / 2% idle` |
+| Host disk | not full - the "vhdx ran out of space" theory is ruled out |
+| Engine, empty | after a forced `wsl --shutdown`, `docker ps` answered in **0.3 s** |
+
+The last two rows decide the diagnosis. Docker and WSL are healthy and the host has space; what
+is broken is the *workload*. The VM is alive, out of memory and I/O-bound, and every process that
+touches the filesystem sits in uninterruptible sleep - which is why `docker stop` hangs instead of
+stopping a container: the runtime cannot make progress either.
+
+### What did not work
+
+1. **Restarting Docker Desktop** (twice). All four k3d containers come back on their own and start
+   at the same moment, so the first minutes are the heaviest the stand ever gets - straight back
+   into swap.
+2. **`wsl --shutdown`, then starting the nodes by hand.** Server alone: fine (load 2.6).
+   `+agent-0`: fine (load 4.6). `+agent-1`: unresponsive within 50 s.
+3. **Disabling the suspect DaemonSet.** That API call hung too, because `docker exec` was in the
+   same uninterruptible state as everything else. You cannot repair a wedged VM from inside it -
+   the one lesson here that generalises to every "the cluster is hung" situation.
+4. **`docker update --restart=no` followed by `docker stop`.** The update succeeded, the stop hung.
+   (The policy itself is worth knowing: `unless-stopped` on all four containers is what turns a
+   Docker Desktop restart into a stampede.)
+
+### What worked
+
+Throw the cluster away and rebuild it:
+
+```powershell
+.\deploy.ps1 -Down            # terraform destroy, 18 s
+.\deploy.ps1 -WithAIOps       # terraform apply + 8 deploy steps, ~5 min
+```
+
+The stand is infrastructure as code, so this is the *cheap* path, not the last resort - it is the
+reason `terraform/` is in the repository at all. The same 7.5 GB VM that could not answer
+`docker ps` now runs the whole stack at load 0.2-0.9 with 2.7 GB free and 0 pods not `Running`.
+
+Why the old cluster was unusable is a hypothesis, and it is worth labelling as one: three days of
+containerd snapshots, Prometheus TSDB and Loki chunks, plus an unclean shutdown in the middle of a
+write, make the first minutes after a cold start the heaviest the stand ever gets. One DaemonSet
+adds to exactly that - `manifests-monitoring/08-prometheus-exporter-disk-usage-ds.yaml` walks the
+whole `/var` of every node with `du` every 300 s (`--threshold` limits the output, not the
+traversal) - but the control experiment that would have proven it needed the API that was already
+gone. What is *proven* is the shape of the fix: a fresh cluster on the same memory limit is
+comfortable.
+
+### Bug 1: `deploy.ps1` died at step 4 of 8 and said nothing
+
+The HPA wait loop checked its metrics with:
+
+```powershell
+kubectl -n sock-shop get hpa -o jsonpath='{range .items[*]}{.status.currentMetrics}{"\n"}{end}'
+```
+
+Windows PowerShell 5.1 drops those embedded double quotes when it hands the argument to a native
+command, so kubectl receives a bare `\n` and refuses it:
+
+```
+error parsing jsonpath {range .items[*]}{.status.currentMetrics}{\n}{end},
+unrecognized character in action: U+005C '\'
+```
+
+The loop retries for two minutes and then throws, so the deploy stopped before steps 5-8: no
+logging, no tracing, no monitoring, no alerting - and the only trace was one line on stderr. The
+fix removes `{"\n"}` (the output is pattern-matched for `averageUtilization`, so a concatenated
+list is enough) and writes the reason next to it, because the next person will otherwise "fix" it
+back.
+
+### Bug 2: `-WithAIOps` ran `kubectl image import`
+
+`Invoke-QuietProbe` - the helper that exists because a native command's stderr becomes a
+terminating error under `$ErrorActionPreference = "Stop"` - hard-coded `kubectl`. The AIOps step
+calls it with `image import ...`, so it ran `kubectl image import`, got exit 1 and printed an empty
+message, because the same helper filters `ErrorRecord`s (that is, stderr) out of its output. Two
+fixes: the helper takes `-Command` (default `kubectl`) and `-KeepStderr`, and the call site passes
+`-Command k3d -KeepStderr`. Same class of defect as section 6.10 - a failure hidden by a stream
+nobody read.
+
+### Bug 3 (cosmetic, and still worth a fix): mojibake in the terminal
+
+`run-local.ps1` prints Russian section headers and was saved as UTF-8 **without a BOM**. PowerShell
+5.1 reads a BOM-less file in the ANSI code page, so the literals were already broken before anything
+printed them (`--- СЂРѕС‚ ...`). Fixed by adding the BOM and setting `[Console]::OutputEncoding` and
+`$OutputEncoding` to UTF-8. Exactly one file in the repository contained non-ASCII bytes, and a byte
+scan found it in a minute - which is the point: this is not a mystery, it is a check.
+
+### How to avoid it next time
+
+The incident produced four changes. In order of how much time they would have saved:
+
+1. **`deploy.ps1` asks the engine before it asks terraform.** A `docker info` with a 15-second
+   deadline: on timeout the script says what is wrong and prints the recovery commands, instead of
+   letting terraform fail for a reason that names none of it. It also prints the VM's memory, because
+   a fresh stand uses ~4.6 GB and the failed one had grown to 7.4 GB of the same 7.55 GB - the number
+   that matters is not the ceiling, it is the distance to it.
+2. **`deploy\diagnose-stand.ps1`** separates the three failures that look identical from `kubectl`:
+   engine wedged, VM thrashing, cluster unhealthy. It measures engine latency, the VM's load average
+   and free memory, then nodes and pods, and stops at the first broken layer with the command to run
+   next. It is read-only, so "run this first" is always safe advice.
+3. **The `scripts-guard` CI job.** The scripts are never executed on CI - there is no Docker Desktop
+   on a Linux runner - but both bug classes are static properties of the files: an embedded double
+   quote in a `jsonpath` argument fails the build, and so does a non-ASCII `.ps1` without a BOM
+   (checked byte-wise, not by eye). Every `.ps1` is also parsed, so a syntax error cannot wait for
+   a deploy to appear.
+4. **Documentation instead of folklore.** The recovery path is in this section, in
+   `terraform/k3d/README.md` and in the root README, whose "Stop / remove" section now says what to
+   do when the stand does not come back.
+5. **Bounded growth, at the level this stand can afford.** Nothing that matters lives on a volume -
+   Prometheus, Loki and the bot's journal all use `emptyDir` - and the bot reads only the last 15
+   minutes of logs, so everything that grows is data nobody asked for. `deploy\cleanup-stand.ps1`
+   removes exactly that: pods in `Succeeded`/`Failed` together with their sandboxes and logs, images
+   no container references (`crictl rmi --prune` on every node), and the Loki and Prometheus data
+   (`rollout restart` - with an `emptyDir`, restarting the pod *is* the delete). It takes about 30
+   seconds against a live stand, leaves the application, the Secrets and the bot in place, reports
+   disk usage and image counts per node before and after, and has `-KeepPrometheus`, `-KeepLogs` and
+   `-DryRun`. A rebuild stays what it is: the last resort for a stand that does not come back. The
+   journal is reported, never truncated - it is the audit trail. Also removed: the last
+   `imagePullPolicy: Always` (on the `du` DaemonSet, which runs on every node), so a restart no longer
+   re-pulls an image at the busiest possible moment.
+
+What is deliberately *not* automated: raising the WSL memory limit. It is a host-level setting
+(`%UserProfile%\.wslconfig`), it changes every WSL distribution on the machine, and the stand works
+without it - so it is a documented recommendation with a warning, not something a deploy script
+edits behind the user's back.
+
+### Why neither the cleanup nor the rebuild is a production pattern
+
+It is worth being explicit, because "recreate the infrastructure every night" is exactly the kind of
+idea that gets copied somewhere it does not belong. On a real cluster the answer to the same symptom
+is different, and it does not involve rebuilding anything:
+
+| Symptom here | Production equivalent |
+| ------------ | --------------------- |
+| one VM, no memory limit per component | `resources.requests/limits` + QoS, so a leak OOM-kills its own pod instead of starving the node |
+| `emptyDir` everywhere, data disposable | PersistentVolumes with real retention (TSDB, Loki compactor) |
+| nobody notices the VM at 97% | an alert on `MemAvailable` headroom, measured in days of runway, not percent |
+| containerd layers grow for weeks | scheduled image pruning (`kubelet --image-gc-high-threshold`, registry policy) |
+| the whole stand is rebuilt | a rolling restart of the one component that leaks, once monitoring says which |
+
+Neither the cleanup nor the rebuild would be acceptable on a production system, and for the same
+reason: the cleanup exists because nobody configured retention, and the rebuild exists because there
+is no volume to keep. Both are safe here only because of three properties this stand has and a real
+system does not: no state worth keeping, no users, and a cost measured in minutes. Both scripts carry
+that caveat in their own help text, so neither can be lifted into a real environment without the
+warning travelling with it.
+
+### Verification
+
+| Check | Result |
+| ----- | ------ |
+| `docker ps` after a forced `wsl --shutdown` | answered in 0.3 s - the engine was never the problem |
+| `.\deploy.ps1 -Down` | `terraform destroy`, 18 s |
+| `.\deploy.ps1 -WithAIOps`, run twice | 8/8 steps both times, image imported, `triage-bot is Ready` |
+| `kubectl get nodes` / `get pods -A` | 3/3 Ready, 0 pods not `Running`/`Completed` |
+| VM after the rebuild | load 0.2-0.9, ~2.7 GB available, same 7.5 GB ceiling as before |
+| `deploy\diagnose-stand.ps1` | exit 0 on a healthy stand; each of the three failures prints its own recovery command |
+| `deploy\cleanup-stand.ps1`, live stand | 3 finished pods deleted, images 18→15 / 18→15 / 15→14, Loki and Prometheus back to `Ready` in under a minute, the VM's disk 23→21 GB |
+| `deploy\cleanup-stand.ps1 -DryRun` | prints the plan, exits 0, changes nothing |
+| `aiops` unit tests / every `.ps1` parsed | 94 tests green, no parse errors |
+| the two `scripts-guard` checks, run locally | 0 jsonpath hits, 0 non-ASCII files without a BOM |
+| `run-local.ps1` again | Russian headers render, DeepSeek answered, the same `bad_params` → `escalate_human` |
+
+The lesson worth keeping: a deploy script is code, and code that only ever runs when a human
+double-clicks it is code without tests. Both bugs were in behaviour that had not been executed
+since it was written - the deploy "worked" because it was demonstrated from the middle. A green run
+of steps 1-4 says nothing about steps 5-8.
+
+
