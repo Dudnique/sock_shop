@@ -1,0 +1,32 @@
+---
+# ClusterIP only: Alertmanager reaches the bot inside the cluster and nobody
+# else does. No NodePort, no Ingress, no LoadBalancer - each of those would put
+# an HTTP endpoint that holds an LLM key on a host interface, which is exactly
+# the mistake this repository already fixed once for Grafana.
+#
+# The three annotations are not decoration. The `kubernetes-service-endpoints`
+# job in 04-prometheus-configmap.yaml keeps only Services that carry
+# `prometheus.io/scrape`, so these lines are what make `aiops_alerts_received`
+# visible in Prometheus - and therefore what makes an alert on "the bot itself
+# went silent" possible at all.
+apiVersion: v1
+kind: Service
+metadata:
+  name: triage-bot
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: triage-bot
+    app.kubernetes.io/name: triage-bot
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+  selector:
+    app.kubernetes.io/component: triage-bot
+    app.kubernetes.io/name: triage-bot

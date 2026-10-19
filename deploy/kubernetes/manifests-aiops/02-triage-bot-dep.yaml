@@ -1,0 +1,118 @@
+---
+# The triage bot: one replica, no cluster credentials, no writable root.
+#
+# The M1 guardrail is visible in this file rather than promised in a document:
+#
+#   * `automountServiceAccountToken: false` and no `serviceAccountName`, so the
+#     pod is handed no token and a bug in the image still cannot call the API
+#     server - it has nothing to authenticate with;
+#   * the image contains no `kubectl`, no client library and no shell
+#     (python:3.12-slim plus the package), so "the model cannot execute
+#     anything" is a property of the artifact, not of the prompt.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triage-bot
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: triage-bot
+    app.kubernetes.io/name: triage-bot
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate. The incident journal (the dedupe window and the
+  # audit trail) is an emptyDir, so a surge pod would start with an empty
+  # window and could notify twice for one incident. Seconds of downtime cost
+  # nothing here: Alertmanager retries the webhook.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: triage-bot
+      app.kubernetes.io/name: triage-bot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: triage-bot
+        app.kubernetes.io/name: triage-bot
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: triage-bot
+          # Built locally from aiops/triage-bot/Dockerfile and pushed into the
+          # k3d node by `.\deploy.ps1 -WithAIOps` (k3d image import). It is
+          # published nowhere, so IfNotPresent is mandatory: with `Always` the
+          # kubelet would go to Docker Hub for it and the pod would never start.
+          image: triage-bot:0.1.0-m1
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: triage-bot-config
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # The journal: `kubectl get incidents` in files, and the dedupe
+            # window across restarts of the process (not across pod restarts -
+            # an emptyDir is honest about that, see the README).
+            - name: journal
+              mountPath: /data
+            # Secrets are mounted as files and read via `*_file` settings.
+            - name: llm-secret
+              mountPath: /etc/aiops/secrets
+              readOnly: true
+            - name: telegram-token
+              mountPath: /etc/aiops/telegram
+              readOnly: true
+      volumes:
+        - name: journal
+          emptyDir: {}
+        # The model key. `optional: true` is deliberate: without it the bot still
+        # runs, the cascade falls back to the ruleset, and every card and
+        # /healthz says "no key in /etc/aiops/secrets/deepseek_api_key". A loud
+        # degradation beats a pod that refuses to start because a key is absent.
+        - name: llm-secret
+          secret:
+            secretName: aiops-llm
+            optional: true
+        # The Telegram token is NOT copied into a second Secret: the bot mounts
+        # the Secret the alerting stack already uses, so there is one place the
+        # token lives and one place it is rotated. `items` narrows the mount to
+        # that single key - the Slack webhook stays invisible to the bot.
+        - name: telegram-token
+          secret:
+            secretName: alertmanager-secrets
+            optional: true
+            items:
+              - key: telegram_bot_token
+                path: telegram_bot_token
+      nodeSelector:
+        kubernetes.io/os: linux

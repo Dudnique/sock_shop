@@ -10,25 +10,52 @@ Pinned image: `prom/alertmanager:v0.34.1` (never `:latest` - reproducible stand)
 
 | File | Purpose |
 | ---- | ------- |
-| `alertmanager-configmap.yaml` | Routing tree + receivers (Telegram, Slack). |
+| `alertmanager-configmap.yaml` | Routing tree + receivers (Telegram, Slack, the triage bot webhook). |
 | `alertmanager-dep.yaml` | Deployment; mounts the config and the secrets. |
 | `alertmanager-svc.yaml` | Service on port 9093. |
 | `examples/` | Samples that `kubectl apply -f <dir>` must NOT pick up. |
 
-## Two channels, and why `continue: true`
+## Three receivers, and why `continue: true`
 
-Both Telegram and Slack receive every alert. Alertmanager walks the routing tree
-and, by default, follows **only the first matching child**, then stops - which
-would skip the root receiver entirely. To fan out to both, the config keeps the
-root receiver plus **two child routes without matchers**, the first carrying
-`continue: true` so evaluation proceeds to the next sibling:
+Telegram, Slack and the triage bot (`aiops-triage`) all see the same firing
+alerts. Alertmanager walks the routing tree and, by default, follows **only the
+first matching child** and then stops - so every route that must not be skipped
+carries `continue: true`:
 
     route:
       receiver: 'telegram'        # fallback: only if no child matches
       routes:
+        - receiver: 'aiops-triage'
+          matchers: ['aiops="true"']
+          continue: true          # the two human channels below still run
         - receiver: 'telegram'
           continue: true          # keep going to the next sibling
         - receiver: 'slack'
+
+The bot's route is guarded by a matcher, so only the rules that opted in with
+`aiops: "true"` reach it, while the human routes carry no matcher and match
+everything. That asymmetry is the point: automation is opt-in per rule, a
+notification is not.
+
+## The triage bot route
+
+`aiops-triage` is a plain `webhook_configs` entry pointing at
+`http://triage-bot.monitoring.svc.cluster.local:8080/alert` (deployed from
+`../manifests-aiops`). Two details are deliberate:
+
+* **No authentication.** The endpoint is a ClusterIP reachable only from a pod of
+  the `monitoring` namespace, which is what
+  `../manifests-aiops/04-triage-bot-netpol.yaml` enforces - the network is the
+  credential. A shared token would add a second secret to protect a port that is
+  already unreachable from anywhere else.
+* **`send_resolved: false`.** The bot triages firing incidents; a resolved
+  webhook is answered `200` and recorded as `skipped: resolved`, so sending them
+  would only inflate `aiops_alerts_skipped{reason="resolved"}`. Humans still get
+  the resolution through the `telegram` receiver.
+
+If the bot is down, Alertmanager's webhook fails and nothing else changes: the
+human routes are independent siblings. A bot that were the single notifier would
+be worse than no bot at all.
 
 ## Secret (never in git)
 

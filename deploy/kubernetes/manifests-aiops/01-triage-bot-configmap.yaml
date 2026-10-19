@@ -1,0 +1,77 @@
+---
+# Runtime configuration of the triage bot (the M1 advisor).
+#
+# Everything here is a *behaviour* knob, never a permission: the action
+# whitelist and the decision schema live in `triage_bot/model.py`, in code, on
+# purpose. Whoever can edit this ConfigMap can change what the bot says, but
+# cannot add an action the image does not already know - see the docstring of
+# that module for why that boundary is in code and not in a file.
+#
+# Secret values are NOT here. The DeepSeek key and the Telegram token are
+# mounted as files (see 02-triage-bot-dep.yaml), exactly the way Alertmanager
+# reads its own token - an environment variable is visible in
+# `kubectl describe pod` and in any child process.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: triage-bot-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: triage-bot
+    app.kubernetes.io/name: triage-bot
+data:
+  # --- model tier ----------------------------------------------------------
+  # `mock` is the tier-0 ruleset: deterministic, offline, needs no key. It is
+  # the M1 default on purpose - the bot is useful, and every test in CI is
+  # meaningful, without a single byte leaving the cluster. Switch to `deepseek`
+  # once the aiops-llm Secret exists, to compare a model's answer with the
+  # ruleset's on the very same alerts.
+  MODEL_ADAPTER: "mock"
+  # Ask the model only when the ruleset is itself unsure (confidence below
+  # CONFIDENCE_THRESHOLD). That is what keeps the token bill proportional to the
+  # genuinely ambiguous alerts instead of to the alert volume.
+  CASCADE_ENABLED: "1"
+  # Eval mode asks the model even when the ruleset answered and keeps BOTH
+  # answers in the journal: the baseline is measured, never assumed.
+  EVAL_MODE: "0"
+  LLM_MAX_TOKENS: "700"
+  LLM_TIMEOUT_SECONDS: "30"
+
+  # --- read-only data sources ----------------------------------------------
+  PROMETHEUS_URL: "http://prometheus.monitoring.svc.cluster.local:9090"
+  LOKI_URL: "http://loki.logging.svc.cluster.local:3100"
+  ALERTMANAGER_URL: "http://alertmanager.monitoring.svc.cluster.local:9093"
+  # 30, not the code's 10. The first series query against a cold TSDB
+  # (WSL2 + a freshly created k3d) takes tens of seconds, and the live run
+  # reported "prometheus: 9 queries failed" while Prometheus was perfectly
+  # healthy - only slower than the budget. The model call gets 30s as well.
+  HTTP_TIMEOUT_SECONDS: "30"
+  LOG_WINDOW_SECONDS: "900"
+  MAX_LOG_LINES: "40"
+
+  # --- triage policy -------------------------------------------------------
+  # Only alerts carrying this label are triaged at all: that is how a rule opts
+  # in to automation, and how an alert nobody wanted automated stays out of it.
+  # `test_coverage.py` fails in CI if a shipped rule that fires has no label.
+  REQUIRE_LABEL: "aiops"
+  CONFIDENCE_THRESHOLD: "0.7"
+  # The bot may only ever name objects in these namespaces. M1 executes nothing,
+  # so this is a guard on what it *proposes*: a deployment outside the list is
+  # rejected before a card is sent.
+  ALLOWED_NAMESPACES: "sock-shop"
+  # The same Alertmanager fingerprint twice inside this window is one incident,
+  # not two - Alertmanager fires, resolves and re-fires all the time.
+  DEDUPE_WINDOW_SECONDS: "1800"
+
+  # --- notification --------------------------------------------------------
+  # The chat id is not a secret and is already in plain sight in the
+  # Alertmanager ConfigMap; the token is read from the mounted file below.
+  TELEGRAM_CHAT_ID: "386518761"
+  TELEGRAM_TOKEN_FILE: "/etc/aiops/telegram/telegram_bot_token"
+  TELEGRAM_MAX_PER_HOUR: "20"
+
+  # --- storage / logging ---------------------------------------------------
+  # The only writable path in the container: an emptyDir mounted at /data. The
+  # root filesystem is read-only, so this is not a preference but a requirement.
+  JOURNAL_DIR: "/data"
+  LOG_LEVEL: "INFO"

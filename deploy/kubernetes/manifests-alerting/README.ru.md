@@ -11,25 +11,52 @@
 
 | Файл | Назначение |
 | ---- | ---------- |
-| `alertmanager-configmap.yaml` | Дерево маршрутизации + receivers (Telegram, Slack). |
+| `alertmanager-configmap.yaml` | Дерево маршрутизации + receivers (Telegram, Slack, вебхук triage-бота). |
 | `alertmanager-dep.yaml` | Deployment; монтирует конфиг и секреты. |
 | `alertmanager-svc.yaml` | Service на порту 9093. |
 | `examples/` | Примеры, которые `kubectl apply -f <dir>` НЕ должен подхватывать. |
 
-## Два канала, и зачем `continue: true`
+## Три receiver'а, и зачем `continue: true`
 
-Каждый алерт приходит и в Telegram, и в Slack. Alertmanager обходит дерево
-маршрутов и по умолчанию идёт **только по первому совпавшему child**, после
-чего останавливается - из-за этого receiver корня был бы пропущен. Чтобы
-разослать в оба, конфиг держит receiver корня плюс **два child-маршрута без
-матчеров**, первый из которых несёт `continue: true`:
+Одни и те же сработавшие алерты видят Telegram, Slack и triage-бот
+(`aiops-triage`). Alertmanager обходит дерево маршрутов и по умолчанию идёт
+**только по первому совпавшему child**, после чего останавливается - поэтому
+`continue: true` стоит на каждом маршруте, который нельзя пропустить:
 
     route:
       receiver: 'telegram'        # fallback: только если ни один child не совпал
       routes:
+        - receiver: 'aiops-triage'
+          matchers: ['aiops="true"']
+          continue: true          # два человеческих канала ниже всё равно сработают
         - receiver: 'telegram'
           continue: true          # продолжить к следующему sibling
         - receiver: 'slack'
+
+Маршрут бота закрыт матчером, поэтому до него доходят только правила, явно
+согласившиеся через `aiops: "true"`; у человеческих маршрутов матчера нет, и они
+совпадают со всем. Эта асимметрия и есть суть: автоматизация - это opt-in на
+уровне правила, а уведомление - нет.
+
+## Маршрут triage-бота
+
+`aiops-triage` - обычный `webhook_configs`, указывающий на
+`http://triage-bot.monitoring.svc.cluster.local:8080/alert` (разворачивается из
+`../manifests-aiops`). Две детали сделаны намеренно:
+
+* **Без аутентификации.** Endpoint - это ClusterIP, до которого дотягивается
+  только pod из namespace `monitoring`, и именно это обеспечивает
+  `../manifests-aiops/04-triage-bot-netpol.yaml`: сеть здесь и есть креденшел.
+  Общий токен добавил бы второй секрет для защиты порта, недостижимого ниоткуда
+  ещё.
+* **`send_resolved: false`.** Бот разбирает *сработавшие* инциденты; resolved-вебхук
+  получает `200` и записывается как `skipped: resolved`, так что отправлять их -
+  значит просто раздувать `aiops_alerts_skipped{reason="resolved"}`. Про
+  разрешение инцидента люди всё равно узнают из receiver'а `telegram`.
+
+Если бот лежит, вебхук Alertmanager'а просто фейлится, и больше ничего не
+меняется: человеческие маршруты - независимые sibling'и. Бот, оказавшийся
+единственным нотификатором, был бы хуже, чем отсутствие бота.
 
 ## Секрет (никогда в git)
 

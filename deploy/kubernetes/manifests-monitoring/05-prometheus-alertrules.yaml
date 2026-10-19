@@ -18,8 +18,11 @@ data:
     #  * `severity` drives routing in Alertmanager; `namespace`, `deployment` and
     #    `pod` are carried as labels because the notification text and any later
     #    log/trace lookup (Loki, Jaeger) need them.
-    #  * `aiops: "true"` marks the alerts an automated first responder should pick
-    #    up. It is deliberately inert today: no Alertmanager receiver matches it yet.
+    #  * `aiops: "true"` marks the alerts the automated first responder picks up.
+    #    The `aiops-triage` receiver in alertmanager-configmap.yaml matches this
+    #    label and POSTs the alert to the triage bot (aiops/triage-bot), so every
+    #    rule here is expected to carry it - a rule without the label fires into
+    #    a void, and `tests/test_coverage.py` fails when one appears.
     groups:
     - name: availability
       rules:
@@ -33,6 +36,10 @@ data:
         labels:
           severity: critical
           namespace: sock-shop
+          # `probe_scope` exists on both probe series (measured: `kubernetes-ingresses`
+          # carries "ingress", `blackbox-external` carries "external"), and it is what
+          # tells the triage bot which layer the probe looks at.
+          probe_scope: "{{ $labels.probe_scope }}"
           aiops: "true"
         annotations:
           summary: "Probe failing: {{ $labels.instance }}"
@@ -43,6 +50,11 @@ data:
         for: 5m
         labels:
           severity: warning
+          # Both probes watch the same entry point, which lives in `sock-shop`
+          # (measured: the ingress probe series carries kubernetes_namespace=sock-shop),
+          # so the namespace is stated rather than inherited.
+          namespace: sock-shop
+          probe_scope: "{{ $labels.probe_scope }}"
           aiops: "true"
         annotations:
           summary: "Probe slow: {{ $labels.instance }}"
@@ -52,10 +64,17 @@ data:
       - alert: HighErrorRate
         # Needs traffic to be meaningful: generate it with the load test
         # (manifests-loadtest, `.\deploy.ps1 -WithLoadtest`).
-        expr: rate(request_duration_seconds_count{status_code="500"}[5m]) > 1
+        #
+        # Scoped to the namespace on purpose. Without the selector this rule also
+        # matched `request_duration_seconds_count` from Promtail's own /metrics
+        # endpoint in the `logging` namespace - measured: that was the only series
+        # of this metric present before the application served its first 500, so an
+        # unscoped rule could fire on the logging stack instead of on the shop.
+        expr: rate(request_duration_seconds_count{kubernetes_namespace="sock-shop",status_code="500"}[5m]) > 1
         for: 5m
         labels:
           severity: warning
+          namespace: sock-shop
           aiops: "true"
         annotations:
           summary: "High HTTP 500 error rate"
@@ -113,6 +132,11 @@ data:
         labels:
           severity: warning
           node: "{{ $labels.node }}"
+          # Node alerts ARE triaged: the bot's answer for them is always
+          # `escalate_human` (see aiops/triage-bot/triage_bot/adapters.py), because
+          # "the disk is full" has no safe automated fix - but a human still gets
+          # the card, the evidence and the proposal.
+          aiops: "true"
         annotations:
           summary: "node/{{ $labels.node }} reports DiskPressure"
           description: "The node is low on disk; image garbage collection and pod eviction may follow."
@@ -122,6 +146,7 @@ data:
         labels:
           severity: warning
           node: "{{ $labels.instance }}"
+          aiops: "true"
         annotations:
           summary: "node/{{ $labels.instance }} CPU above 90% for 10m"
           description: "Sustained CPU saturation: pods on this node will get slower."
@@ -131,6 +156,7 @@ data:
         labels:
           severity: warning
           node: "{{ $labels.instance }}"
+          aiops: "true"
         annotations:
           summary: "node/{{ $labels.instance }} memory above 90% for 10m"
           description: "Available memory is nearly exhausted; the OOM killer becomes likely."
@@ -143,6 +169,10 @@ data:
         for: 5m
         labels:
           severity: warning
+          # Triage of this one starts with the question the rule cannot answer:
+          # did the target die, or did the scraping die? The bot's tier-0 answer is
+          # an escalation, so the card reaches a human instead of staying silent.
+          aiops: "true"
         annotations:
           summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
           description: "A target has been down for 5m; its metrics are missing, so other alerts cannot fire either."

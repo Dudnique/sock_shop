@@ -19,6 +19,17 @@ data:
       receiver: 'telegram'
 
       routes:
+        # The triage bot goes FIRST, and only for the alerts that opted in with
+        # `aiops: "true"` - not for every alert on the stand. `continue: true`
+        # keeps the two human receivers below running: a bot that were the only
+        # one notified would make an outage of the bot itself silent, which is
+        # the exact failure mode this stand is built to avoid. (Without
+        # `continue` the two routes below would never be evaluated once this one
+        # matched.)
+        - receiver: 'aiops-triage'
+          matchers:
+            - aiops="true"
+          continue: true
         # Two child routes WITHOUT matchers match every alert, so each alert is
         # delivered to both receivers. `continue: true` on the first makes the
         # evaluation proceed to the next sibling. (Without this, the root
@@ -57,3 +68,23 @@ data:
             title: '{{ .CommonLabels.alertname }} ({{ .Alerts | len }})'
             text: |-
               {{ range .Alerts }}{{ .Annotations.description }}{{ end }}
+
+      # --- AIOps triage bot ---------------------------------------------------
+      # A webhook into the triage bot's Service (manifests-aiops). There is no
+      # authentication on purpose and none is needed: the endpoint is a
+      # ClusterIP that only a pod of this namespace may reach, which is what
+      # 04-triage-bot-netpol.yaml enforces - the network is the credential.
+      #
+      # `send_resolved: false` is deliberate. The bot triages *firing* incidents;
+      # a resolved webhook is answered 200 and recorded as "skipped: resolved",
+      # so sending them would only add noise to the bot's own metric
+      # `aiops_alerts_skipped{reason="resolved"}`. The humans still get the
+      # resolution through the `telegram` receiver above.
+      #
+      # The bot answers 200 even when a triage step failed, so a model outage
+      # cannot turn into an Alertmanager retry storm - the failure is described
+      # in the response body and in the log instead.
+      - name: 'aiops-triage'
+        webhook_configs:
+          - url: 'http://triage-bot.monitoring.svc.cluster.local:8080/alert'
+            send_resolved: false

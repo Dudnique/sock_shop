@@ -1,0 +1,88 @@
+---
+# What the bot may talk to - and, more importantly, what it may not.
+#
+# The `monitoring` namespace has no default-deny (only `sock-shop` does), so
+# this policy is the only thing standing between the bot and the rest of the
+# cluster. It is written as an exhaustive allow-list, which makes the egress
+# side readable in one screen:
+#
+#   out: DNS, Prometheus, Loki, Telegram (443), DeepSeek (443) - nothing else;
+#   in:  Alertmanager (the webhook) and Prometheus (the scrape), on 8080 only.
+#
+# `podSelector` with labels rather than `podSelector: {}`: a policy that names
+# its pod cannot silently widen when a second workload appears in the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: triage-bot
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: triage-bot
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # The Alertmanager webhook: POST /alert. Both pods live in this namespace,
+    # so this is a plain pod-to-pod rule.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: alertmanager
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Prometheus scrapes /metrics through the Service (see 03-triage-bot-svc.yaml).
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS first: without it every cluster name below fails with "no such host"
+    # and it reads like an application bug rather than like a firewall - the
+    # trap called out in manifests-policy/01-platform-traffic.yaml.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Evidence, part 1: metrics.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+    # Evidence, part 2: logs. Loki is in another namespace, so a podSelector
+    # alone could not express this one.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: logging
+      ports:
+        - protocol: TCP
+          port: 3100
+    # There is deliberately NO egress rule to Alertmanager (9093). In M1 the bot
+    # only *receives* from it - it calls no silence and no notification API - and
+    # a rule for a connection nobody has ever observed would make this policy
+    # look stricter than it is, the same reasoning as
+    # manifests-policy/10-front-end.yaml.
+    # api.telegram.org and api.deepseek.com. TLS is terminated by the remote
+    # side, so a NetworkPolicy cannot name the host: 443 to the internet is the
+    # narrowest thing it can express, and it is stated here openly instead of
+    # being hidden behind a default-allow.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
