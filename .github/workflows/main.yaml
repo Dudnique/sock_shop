@@ -57,6 +57,7 @@ jobs:
           /work/deploy/kubernetes/manifests-jaeger \
           /work/deploy/kubernetes/manifests-monitoring \
           /work/deploy/kubernetes/manifests-alerting \
+          /work/deploy/kubernetes/manifests-aiops \
           /work/deploy/kubernetes/manifests-loadtest \
           /work/deploy/kubernetes/manifests-policy \
           /work/deploy/kubernetes/autoscaling
@@ -128,7 +129,60 @@ jobs:
         echo "OK: Grafana guards passed"
 
   # ---------------------------------------------------------------------------
-  # 3) Helm chart sanity check (no cluster required).
+  # 3) AIOps triage bot: unit tests, the image, and the M1 guardrails.
+  #    The bot is a standard-library-only Python service, so `unittest` is the
+  #    whole test runner - no pip install, no lockfile, nothing to cache, and the
+  #    runner's preinstalled python3 (the same minor version as python:3.12-slim)
+  #    is the interpreter that ships.
+  #
+  #    This suite is why the component can be changed confidently: the decision
+  #    schema, the action whitelist, the tier-0 ruleset vs the shipped alert rules
+  #    coverage gate, the cascade, the journal, the Loki selector and the Telegram
+  #    formatting are all asserted offline. A red job therefore always means OUR
+  #    code is wrong, never that a provider is down or that a key ran out.
+  # ---------------------------------------------------------------------------
+  aiops-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - name: Run the triage-bot suite (unittest, stdlib only)
+      working-directory: aiops/triage-bot
+      run: |
+        python3 --version
+        python3 -m unittest discover -s tests -t . -v
+
+    # The guardrails of milestone M1 are one-line YAML facts, so a grep is a real
+    # test rather than a ritual: the bot must be handed no cluster token, must not
+    # name a ServiceAccount, and must keep a read-only root filesystem. A future
+    # edit that quietly relaxes one of them fails here instead of in production.
+    - name: Guard the M1 guardrails in the AIOps manifests
+      run: |
+        set -eu
+        dep=deploy/kubernetes/manifests-aiops/02-triage-bot-dep.yaml
+        grep -qE '^[[:space:]]*automountServiceAccountToken:[[:space:]]*false' "$dep"
+        if grep -qE '^[[:space:]]*serviceAccountName:' "$dep"; then
+          echo "::error::the triage bot names a ServiceAccount - M1 has no cluster credentials"
+          exit 1
+        fi
+        grep -qE '^[[:space:]]*readOnlyRootFilesystem:[[:space:]]*true' "$dep"
+        if grep -rqE '^[[:space:]]*kind:[[:space:]]*(ClusterRole|ClusterRoleBinding|Role|RoleBinding)$' \
+             deploy/kubernetes/manifests-aiops/*.yaml; then
+          echo "::error::RBAC objects appeared in manifests-aiops - the bot must hold no permissions"
+          exit 1
+        fi
+        echo "OK: no token, no ServiceAccount, no RBAC, read-only root"
+
+    # The Dockerfile is otherwise never exercised: nothing else builds this image
+    # (deploy.ps1 does, on a workstation). Building it here catches the one thing
+    # that can actually break - the package layout drifting from the COPY line.
+    - name: Build the image and import-smoke-test it
+      run: |
+        docker build -t triage-bot:ci aiops/triage-bot
+        docker run --rm --entrypoint python triage-bot:ci \
+          -c "import triage_bot, triage_bot.server, triage_bot.pipeline; print(triage_bot.__version__)"
+
+  # ---------------------------------------------------------------------------
+  # 4) Helm chart sanity check (no cluster required).
   #    - `helm lint --strict` catches malformed Chart.yaml, bad values, and
   #      template syntax errors (it is run with --strict so warnings fail too).
   #    - `helm template` renders every template, so we know a bad edit does not
@@ -155,7 +209,7 @@ jobs:
           -strict -summary -ignore-missing-schemas /work/rendered.yaml
 
   # ---------------------------------------------------------------------------
-  # 4) Terraform static checks (no cloud and no Docker required).
+  # 5) Terraform static checks (no cloud and no Docker required).
   #    - `terraform fmt -check` enforces canonical formatting; the job fails
   #      (with a diff) if a .tf file is not formatted.
   #    - `terraform init -backend=false` downloads the providers without locking
@@ -183,7 +237,7 @@ jobs:
         terraform validate
 
   # ---------------------------------------------------------------------------
-  # 5) Build and push the openapi / healthcheck helper images.
+  # 6) Build and push the openapi / healthcheck helper images.
   #
   #    Release-only job: it publishes real images to Docker Hub, so it must NOT
   #    run on every push to the default branch. We deliberately gate it on
@@ -218,3 +272,64 @@ jobs:
         context: ${{ matrix.repo }}
         push: true
         tags: ${{ env.GROUP }}/${{ matrix.repo }}:${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # 7) The deployment scripts are never executed on CI - there is no Docker
+  #    Desktop on a Linux runner - which is exactly why two of their defects
+  #    survived: a jsonpath argument that only breaks under Windows PowerShell
+  #    5.1, and a .ps1 saved as UTF-8 without a BOM (5.1 then reads its
+  #    non-ASCII literals in the ANSI code page, so the text is mojibake before
+  #    it is even printed). Both are static properties of the files, so they can
+  #    be checked here without a cluster. See FIXES.md, section 17.
+  # ---------------------------------------------------------------------------
+  scripts-guard:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    # A syntax error in a script that only ever runs on a workstation would
+    # otherwise be found by the person deploying, at the worst possible moment.
+    - name: Parse every PowerShell script
+      shell: pwsh
+      run: |
+        $failed = 0
+        Get-ChildItem -Recurse -Filter *.ps1 |
+          Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' } |
+          ForEach-Object {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              Write-Host "::error file=$($_.FullName)::$($errors[0].Message)"
+              $failed++
+            }
+          }
+        if ($failed -gt 0) { exit 1 }
+        Write-Host "OK: every .ps1 parses"
+
+    - name: Guard the two script traps
+      shell: bash
+      run: |
+        set -eu
+        # 1) An embedded double quote inside a jsonpath argument is stripped by
+        #    Windows PowerShell 5.1 before kubectl ever sees it, and kubectl then
+        #    dies with "unrecognized character in action: U+005C '\'". That killed
+        #    deploy.ps1 at step 4 of 8 and left no error in the log.
+        if grep -rn --include='*.ps1' --exclude-dir=.git 'jsonpath=.*\\"' .; then
+          echo "::error::a jsonpath argument contains an embedded double quote (FIXES.md, section 17)"
+          exit 1
+        fi
+        # 2) A BOM-less UTF-8 file with non-ASCII characters is read as ANSI by 5.1.
+        bad=""
+        for f in $(find . -name '*.ps1' -not -path './.git/*'); do
+          if iconv -f ASCII -t ASCII "$f" >/dev/null 2>&1; then
+            continue
+          fi
+          if [ "$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')" != "efbbbf" ]; then
+            bad="$bad $f"
+          fi
+        done
+        if [ -n "$bad" ]; then
+          echo "::error::non-ASCII bytes without a UTF-8 BOM:$bad (see FIXES.md, section 17)"
+          exit 1
+        fi
+        echo "OK: no jsonpath quoting trap, every non-ASCII script carries a BOM"
