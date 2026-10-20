@@ -19,10 +19,10 @@ metadata:
     app.kubernetes.io/name: triage-bot
 spec:
   replicas: 1
-  # Recreate, not RollingUpdate. The incident journal (the dedupe window and the
-  # audit trail) is an emptyDir, so a surge pod would start with an empty
-  # window and could notify twice for one incident. Seconds of downtime cost
-  # nothing here: Alertmanager retries the webhook.
+  # Recreate, not RollingUpdate. The journal is a ReadWriteOnce volume and has a
+  # single writer (see 00-triage-bot-pvc.yaml); a surge pod would either block on
+  # the mount or, with two writers, corrupt the append-only file. Seconds of
+  # downtime cost nothing here: Alertmanager retries the webhook.
   strategy:
     type: Recreate
   selector:
@@ -81,8 +81,8 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             # The journal: `kubectl get incidents` in files, and the dedupe
-            # window across restarts of the process (not across pod restarts -
-            # an emptyDir is honest about that, see the README).
+            # window across pod restarts. A PVC rather than an emptyDir, because
+            # the cards in the chat outlive the pod and their buttons must too.
             - name: journal
               mountPath: /data
             # Secrets are mounted as files and read via `*_file` settings.
@@ -94,7 +94,8 @@ spec:
               readOnly: true
       volumes:
         - name: journal
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: triage-bot-journal
         # The model key. `optional: true` is deliberate: without it the bot still
         # runs, the cascade falls back to the ruleset, and every card and
         # /healthz says "no key in /etc/aiops/secrets/deepseek_api_key". A loud

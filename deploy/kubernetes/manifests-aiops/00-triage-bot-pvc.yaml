@@ -1,0 +1,31 @@
+---
+# The journal outlives the pod, not only the process.
+#
+# It used to be an emptyDir, and the Deployment said so honestly: after a rollout
+# the chat still showed yesterday's cards, but every button on them answered
+# "инцидент не найден: журнал пода эфемерный" - "📄 отчёт" included, which reads
+# as "the report button is broken". The dedupe window and the snooze table live
+# in the same `/data`, so the same restart also re-opened incidents Alertmanager
+# was still retrying - the bot notified twice for one incident, which is exactly
+# what the dedupe was written to prevent.
+#
+# `local-path` is the provisioner this k3d stand already has (the repository
+# installs no StorageClass of its own). A local-path volume is bound to one node
+# and the scheduler puts the pod back on it, so the single replica follows its
+# journal. That is the honest trade for an advisor whose memory is a file: a node
+# that stays down keeps the bot Pending, and that is visible instead of silent.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: triage-bot-journal
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: triage-bot
+    app.kubernetes.io/name: triage-bot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 256Mi

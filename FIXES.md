@@ -1105,5 +1105,46 @@ Docker VM unresponsive, and each looked like the other. What separated them was 
 node (`docker exec ... uptime`, `free -m`, `kubectl get hpa`) instead of asking the API that was
 already gone.
 
+---
+
+## 19. The bot that triaged itself: one bad line of text, and a journal that outlived its data
+
+**Symptom.** Telegram received an endless stream: Alertmanager's own message "Prometheus cannot
+scrape `kubernetes-service-endpoints` (10.42.2.14:8080)", then an AI triage card for it, then the same
+pair again after every restart. Pressing "📄 отчёт" on an older card did nothing visible - the toast
+said "инцидент не найден: журнал пода эфемерный" and the report never arrived.
+
+**What the measurements said.**
+
+- `api/v1/targets` gave the whole answer in one field: `lastError: expected metric name after HELP,
+  got "(" ... "# HELP ("`. The bot's `/metrics` served `# HELP ('aiops_alerts_received', ()) …`,
+  because `render()` unpacked `(name, labels), value` as `(name, labels)`: the dictionary key is
+  itself a tuple, so `name` became the entire key.
+- Prometheus rejects the **whole scrape** on the first invalid line. So `up{job=...,kubernetes_name=
+  "triage-bot"}` was 0, and the `ScrapeTargetDown` rule (`aiops: "true"`) fired on the bot's own
+  endpoint. The bot triaged its own scrape failure, which is a closed loop that no amount of dedupe
+  can fix: the card is produced by the very thing that is broken.
+- 120 tests and not one called `Metrics.render()`. `snapshot()` was tested; the wire format - the
+  only part Prometheus sees - was not.
+- The journal (`/data`) was an `emptyDir`, and so were the dedupe table and the snooze list. Every
+  pod recreate wiped all three: cards stayed in the chat, their buttons no longer resolved an
+  incident id, and Alertmanager's retry was triaged as a fresh incident.
+
+**Fixes.**
+
+| What | Why |
+| ---- | --- |
+| `metrics.py`: flatten to `(name, labels, value)` once, then render | The bug was an unpacking shape assumed twice. Stating it once makes the invalid line impossible to write. |
+| `_GAUGES` as an explicit set; `aiops_build_info{tier1,version} 1` at startup | `TYPE` was decided by a string comparison against one timestamp name; a second gauge would have been exported as a counter. Build info also gives an idle `/metrics` one real sample, so "empty" and "broken" stop looking identical. |
+| `tests/test_metrics.py` (9 tests) parses the exposition line by line | Substring assertions passed on the broken output - the metric names were all there. The test now fails on `# HELP (` the way Prometheus does. |
+| PVC `triage-bot-journal` (256Mi, `local-path`) instead of `emptyDir` | The chat outlives the pod, so the journal must too: dedupe, snooze, `/incidents` and every button on an older card read from it. |
+| missing incident now answers in the chat, not only in a toast | A three-second toast is indistinguishable from "the button is broken"; the message names the journal and where the live cards are. |
+
+Measured after the rebuild: `up{kubernetes_name="triage-bot"} = 1`, `scrape_samples_scraped = 1`,
+`aiops_build_info{tier1="deepseek",version="0.1.0-m1"} = 1`, and **zero** active alerts. The lesson is
+narrower than "write tests": a metrics endpoint is an interface with a grammar, and an untested
+interface is a guess - the guess was wrong for 40 minutes of cluster time and every restart after it.
+
+
 
 

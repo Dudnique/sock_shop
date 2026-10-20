@@ -39,6 +39,11 @@ def main() -> int:
     log.info("aiops-triage %s starting", __version__)
 
     metrics = Metrics()
+    # One sample from the first second of the process's life. Without it an idle
+    # bot serves an empty body: Prometheus accepts it (`up=1`) but a human reading
+    # /metrics cannot tell it from a half-broken endpoint, and "the bot is
+    # silent" rests on `up` alone.
+    metrics.set("aiops_build_info", 1, version=__version__, tier1=settings.model_adapter)
     journal = Journal(settings.journal_dir)
     prometheus = PrometheusClient(settings.prometheus_url, settings.http_timeout_seconds)
     loki = LokiClient(settings.loki_url, settings.http_timeout_seconds)

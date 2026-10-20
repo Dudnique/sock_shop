@@ -24,8 +24,13 @@ _HELP = {
     "aiops_telegram_sent": "Telegram messages sent.",
     "aiops_telegram_suppressed": "Telegram messages suppressed by the rate limit.",
     "aiops_decisions_recorded": "Human decisions recorded from Telegram, by decision.",
+    "aiops_build_info": "Always 1; carries the version and the tier-1 adapter.",
     "aiops_last_incident_timestamp_seconds": "Unix time of the last triaged incident.",
 }
+
+#: The gauges. Everything else in this registry is a counter - a set of names, not
+#: a second stringly-typed rule hidden in `render()`.
+_GAUGES = frozenset({"aiops_last_incident_timestamp_seconds", "aiops_build_info"})
 
 
 def _escape(value: str) -> str:
@@ -69,16 +74,24 @@ class Metrics:
     def render(self) -> str:
         lines: list[str] = []
         with self._lock:
-            counters = list(self._counters.items())
-            gauges = list(self._gauges.items())
+            # One flat list of (name, labels, value). Unpacking `(name, labels)
+            # in self._counters.items()` reads naturally and is wrong: the key
+            # is itself a tuple `(name, labels)`, so `name` became the whole key
+            # and the exposition started with
+            # `# HELP ('aiops_alerts_received', ()) ...` - one invalid line and
+            # Prometheus drops the entire scrape, `up` goes to 0 and the
+            # `ScrapeTargetDown` rule fires on the bot's own /metrics. Flattening
+            # first means the shape is stated once instead of assumed twice.
+            samples = [(name, labels, value)
+                       for (name, labels), value in
+                       list(self._counters.items()) + list(self._gauges.items())]
         emitted: set = set()
-        for name, labels in counters + gauges:
+        for name, _labels, _value in samples:
             if name in emitted:
                 continue
             emitted.add(name)
             lines.append(f"# HELP {name} {_HELP.get(name, name)}")
-            lines.append(f"# TYPE {name} counter" if name != "aiops_last_incident_timestamp_seconds"
-                         else f"# TYPE {name} gauge")
-        for (name, labels), value in counters + gauges:
+            lines.append(f"# TYPE {name} " + ("gauge" if name in _GAUGES else "counter"))
+        for name, labels, value in samples:
             lines.append(f"{name}{self._fmt_labels(labels)} {value:g}")
         return "\n".join(lines) + "\n"

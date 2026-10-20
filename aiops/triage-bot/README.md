@@ -353,6 +353,7 @@ the Service carries `prometheus.io/scrape: "true"` so the existing
 | `aiops_telegram_sent` / `aiops_telegram_suppressed` | delivered, or rate-limited |
 | `aiops_telegram_documents` | reports delivered as files |
 | `aiops_decisions_recorded{decision}` | human button presses |
+| `aiops_build_info{version,tier1}` | always `1` - the sample that proves an idle `/metrics` is alive |
 | `aiops_last_incident_timestamp_seconds` | freshness - the gauge a "silent bot" alert reads |
 
 ## Tests and CI
@@ -389,8 +390,10 @@ also validated by `kubeconform -strict`.
   alert. Pod events, node conditions and `describe` output are not on the card -
   they are in `missing`, which is the honest version of the same thing.
 * **One replica and an in-memory recent-incident cache.** The journal survives a
-  restart (`/data`), the cache does not; the journal is the source of truth, and it
-  is what `/incidents` reads.
+  pod restart (`/data` is the `triage-bot-journal` PVC), the cache does not; the
+  journal is the source of truth, and it is what `/incidents` reads. It was an
+  `emptyDir` once, and the cards outlived their data: buttons on yesterday's
+  message answered "incident not found", `📄 отчёт` included.
 * **No authentication on the webhook** - the NetworkPolicy is the credential, as
   in the alerting stack.
 * **The ruleset knows only the alerts this stand fires.** A new alert is a new row

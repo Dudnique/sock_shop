@@ -312,8 +312,15 @@ class TriagePipeline:
             return None
         incident = self.find_incident(ident)
         if incident is None:
-            self.telegram.answer_callback(
-                callback_id, "инцидент не найден: журнал пода эфемерный")
+            # A toast disappears in three seconds, and "the report button does
+            # nothing" is then the honest-looking conclusion. Say it in the chat,
+            # with the reason, so the person knows which artifact to ask for.
+            self.telegram.answer_callback(callback_id, "инцидент не найден в журнале")
+            self.telegram.send_message(
+                f"📄 <b>отчёт недоступен</b> · <code>#{esc(ident)}</code>\n"
+                "Этого инцидента нет в журнале: карточка старше журнала или "
+                "PVC <code>triage-bot-journal</code> был пересоздан. "
+                "Живые карточки — в <code>/incidents</code> пода.")
             return None
 
         command = (incident.get("final") or {}).get("command") or ""
