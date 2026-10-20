@@ -125,10 +125,10 @@ in the journal and on the card, and the ruleset's answer still counts. That is h
 "the model is worth its price" becomes numbers (`aiops_incidents_tier{tier=...}`,
 tokens, latency, agreement) instead of an opinion.
 
-## Two bugs the first live run found
+## What the live runs found
 
-Both were found by running the bot against the live stand - not by reading the
-code, and not by the tests, which were green before and after.
+All of them were found by running the bot against the live stand - not by reading
+the code, and not by the tests, which were green before and after.
 
 **1. The Loki selector asked for a label that does not exist.** Promtail cuts its
 labels out of the log *file path* on the node
@@ -162,6 +162,15 @@ broken.
 `MODEL_ADAPTER=mock`, where nothing is missing at all. `model_tier_reason` now
 returns an empty string for `mock`, because `mock` *is* the tier-0 ruleset: a
 misleading health field costs more than the three lines it takes to remove it.
+
+**4. "No log lines" about a deployment that has no pods.** In the M1 demo
+`front-end` was scaled to `0` and the card listed
+`loki: no log lines in the window` - the very sentence a broken selector produced
+in bug 1, so it pointed the reader at Loki instead of at `desired=0`. The context
+already held `replicas_desired[front-end]=0`; `context._is_scaled_to_zero()` now
+reads it, and the card says `loki: no pods - the deployment is scaled to 0
+(desired=0), so there is nothing to log`. An unknown number keeps the old wording,
+because silence must not be turned into a diagnosis either.
 
 ### A live model run: the first real `bad_params`
 
@@ -367,7 +376,7 @@ python -m unittest discover -s tests -t . -v      # 120 tests, seconds, no netwo
 | --------- | ------------ |
 | `test_model.py` | the decision schema: unknown action, missing key, `replicas: 0`, prose instead of JSON, `proposal` without `escalate_human` |
 | `test_adapters.py` | the ruleset, `PREMISES` (a contradiction escalates, a missing metric does not), the provider table, the prose `answer()` path |
-| `test_context.py` | the PromQL queries, the **Loki label names** (the bug), `missing` on every failure |
+| `test_context.py` | the PromQL queries, the **Loki label names** (the bug), `missing` on every failure, the `desired=0` wording |
 | `test_pipeline.py` | the cascade order, dedupe, snooze, tier metrics, escalation reasons, the two follow-up buttons |
 | `test_report.py` | the report: cause -> grounds -> step, the hidden cascade, human presses in order, tables that survive a `\|` |
 | `test_telegram.py` | the card, four buttons for an action and three for an escalation, the hand-built `sendDocument` multipart |

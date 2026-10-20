@@ -96,6 +96,41 @@ class CollectContextTests(unittest.TestCase):
             make_settings(), FakePrometheus(), FakeLoki([]))
         self.assertTrue(any("no log lines" in gap for gap in context["missing"]))
 
+    def test_a_scaled_to_zero_deployment_says_so_instead_of_no_log_lines(self) -> None:
+        """A deployment at `desired=0` has no pod, so there is nothing to log.
+
+        The M1 demo produced "loki: no log lines in the window" for a front-end
+        that had been scaled to zero - the same wording as the selector bug, and
+        therefore the wrong clue for whoever reads the card. The number that
+        settles it is already in the context, so the gap names it.
+        """
+        context = collect_context(
+            {"labels": {"namespace": "sock-shop", "deployment": "front-end"}},
+            make_settings(),
+            FakePrometheus({"kube_deployment_spec_replicas": 0,
+                            "kube_deployment_status_replicas_available": 0}),
+            FakeLoki([]))
+        joined = " ".join(context["missing"])
+        self.assertIn("scaled to 0", joined)
+        self.assertNotIn("no log lines", joined)
+
+    def test_a_deployment_with_pods_keeps_the_plain_wording(self) -> None:
+        """Only a known zero changes the sentence; a live-but-silent pod does not."""
+        context = collect_context(
+            {"labels": {"namespace": "sock-shop", "deployment": "front-end"}},
+            make_settings(),
+            FakePrometheus({"kube_deployment_spec_replicas": 1,
+                            "kube_deployment_status_replicas_available": 1}),
+            FakeLoki([]))
+        self.assertIn("loki: no log lines in the window", context["missing"])
+
+    def test_unknown_desired_replicas_is_not_treated_as_scaled_to_zero(self) -> None:
+        """Silence is not evidence: without the number the wording stays honest."""
+        context = collect_context(
+            {"labels": {"namespace": "sock-shop", "deployment": "front-end"}},
+            make_settings(), FakePrometheus(), FakeLoki([]))
+        self.assertIn("loki: no log lines in the window", context["missing"])
+
     def test_error_filter_falls_back_to_latest_lines(self) -> None:
         class OnceEmptyLoki(FakeLoki):
             def log_lines(self, logql, window_seconds, limit):

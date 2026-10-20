@@ -111,6 +111,27 @@ def _first(result: list[dict]) -> str:
     return result[0]["value"] if result else ""
 
 
+def _is_scaled_to_zero(context: dict, deployment: str) -> bool:
+    """True when the deployment's desired replica count is a known zero.
+
+    A deployment at `desired=0` has no pods at all, so Loki cannot answer with
+    lines however correct the selector is. Saying "no log lines in the window"
+    there reads like a broken query - live, it made a scaled-to-zero front-end
+    look like a Loki problem - while the report already holds the number that
+    settles it. An unknown or unparseable value stays `False`: guessing "scaled
+    to zero" from silence would be the same mistake in the other direction.
+    """
+    if not deployment:
+        return False
+    for key, value in context["prometheus"].items():
+        if key == f"replicas_desired[{deployment}]":
+            try:
+                return float(value) == 0.0
+            except (TypeError, ValueError):
+                return False
+    return False
+
+
 def plan_queries(labels: dict) -> list:
     """The metric questions worth asking about *this* alert - and no others.
 
@@ -262,6 +283,12 @@ def collect_context(alert: dict, settings, prometheus: PrometheusClient,
             context["loki"] = lines
             if lines:
                 context["sources"].append("loki")
+            elif _is_scaled_to_zero(context, deployment):
+                # Evidence, not a gap: nothing is wrong with Loki or the
+                # selector, the workload simply has no process to log.
+                context["missing"].append(
+                    "loki: no pods - the deployment is scaled to 0 (desired=0), "
+                    "so there is nothing to log")
             else:
                 context["missing"].append("loki: no log lines in the window")
         except SourceError as exc:

@@ -1175,3 +1175,23 @@ Running" only ever proved that `mkdir` had succeeded.
 **Trade-off.** A rebuilt cluster loses the journal, and that is the right default - the journal is
 history, not configuration. Cards that outlive it answer with the explanation instead of a report.
 
+## 21. "No log lines" about a deployment that has no pods
+
+**Symptom (live, the M1 demo).** `front-end` was scaled to `0` and the card's `missing` list said
+`loki: no log lines in the window` - the exact sentence the Loki selector bug produced when the query
+itself was broken. Two very different states, one wording, and it pointed the reader at the wrong one.
+
+**What was actually true.** Loki was healthy and the selector was right: there was no process to log,
+because `desired=0`. The context already carried `replicas_desired[front-end]=0`, so the card withheld
+evidence it had.
+
+**Fix.** `context._is_scaled_to_zero()` looks for that series, and `collect_context` uses it only when
+the value is a known zero: `loki: no pods - the deployment is scaled to 0 (desired=0), so there is
+nothing to log`. A `desired=1` and a missing series both keep the old sentence - turning silence into
+"scaled to zero" would be the same mistake in the other direction.
+
+**Tests.** `tests/test_context.py` asserts both directions: at zero the card must say "scaled to 0" and
+must not say "no log lines"; a live-but-silent deployment and an unanswered query keep the plain
+wording. Not measured live yet - the running stand still has the previous image, and rebuilding it is
+the next step rather than a claim.
+
