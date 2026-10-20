@@ -50,6 +50,7 @@ The cluster publishes two kinds of host ports:
 |---|---|---|---|
 | `ingress_http_port` (default `8080`) | `80` | load balancer | Sock Shop through Traefik/Ingress |
 | `ingress_https_port` (default `8443`) | `443` | load balancer | HTTPS (reserved for TLS) |
+| `api_port` (default `57443`) | `6443` | load balancer | `kubectl` - pinned, see below |
 | every key of `exposed_node_ports` | matching NodePort | first server node | tooling: Prometheus `9090`, Alertmanager `9093`, Jaeger UI `16686` |
 
 Why two mechanisms: the app is routed by the ingress controller (Traefik) on the

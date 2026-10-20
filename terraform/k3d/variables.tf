@@ -39,6 +39,22 @@ variable "ingress_https_port" {
   default     = 8443
 }
 
+variable "api_port" {
+  description = <<-EOT
+    Host port for the Kubernetes API (k3d's `kubeAPI.hostPort`).
+
+    Pinned on purpose. k3d otherwise picks a random port at creation, and on
+    Windows that port can end up inside a dynamic exclusion range reserved by
+    Hyper-V/WSL after the machine or the Docker VM restarts. Measured: a cluster
+    created with API port 56910 refused to start its load balancer once Windows
+    reserved 56897-56996 - `docker start` answered "ports are not available ...
+    access permissions", and because k3d publishes the API through that same load
+    balancer, `kubectl` became unreachable even though every node was healthy.
+  EOT
+  type        = string
+  default     = "57443"
+}
+
 variable "exposed_node_ports" {
   description = <<-EOT
     Extra host-port : NodePort mappings published for the tooling

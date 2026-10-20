@@ -46,8 +46,14 @@ scaling a stateful store on this stand would mean multiple writers over an
 - **`maxReplicas: 5`** - a node-budget decision, not a round number: eight
   services x 10 replicas would be 80 pods on three k3d nodes, which measures the
   nodes rather than the application.
-- **`behavior`**: up 2 pods / 30 s, down 1 pod / 60 s behind a 300 s
-  stabilization window. Without it you get the classic flap.
+- **`behavior`**: up 2 pods / 30 s, but only after a **120 s** scale-up
+  stabilization window; down 1 pod / 60 s behind a 300 s window. Without it you
+  get the classic flap - and on a cold start the opposite: every JVM warms up at
+  once, `carts` spends a minute at 183% of its 100m request, and the HPA takes it
+  to five replicas. Measured on this stand: with a 30 s window a rebuild left
+  `carts` and `shipping` at 5 pods each and the 7.5 GB Docker VM at **64 MB free**
+  with a load average of 12 - `kubectl` times out and `docker ps` stalls, which
+  looks like a dead cluster. With 120 s both stay at one replica.
 
 ## Prerequisites (both checked by `deploy.ps1`)
 

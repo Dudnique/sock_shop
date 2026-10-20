@@ -51,6 +51,7 @@ terraform destroy
 |---|---|---|---|
 | `ingress_http_port` (по умолчанию `8080`) | `80` | load balancer | Sock Shop через Traefik/Ingress |
 | `ingress_https_port` (по умолчанию `8443`) | `443` | load balancer | HTTPS (зарезервирован под TLS) |
+| `api_port` (по умолчанию `57443`) | `6443` | load balancer | `kubectl` - закреплён, см. ниже |
 | каждый ключ `exposed_node_ports` | соответствующий NodePort | первая server-нода | тулы: Prometheus `9090`, Alertmanager `9093`, Jaeger UI `16686` |
 
 Почему два механизма: приложение маршрутизируется ingress-контроллером (Traefik)

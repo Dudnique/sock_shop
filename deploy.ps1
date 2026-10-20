@@ -222,6 +222,24 @@ try {
     $env:KUBECONFIG = (terraform output -raw kubeconfig_path)
     $appUrl         = terraform output -raw app_url
     $toolUrlsJson   = terraform output -json tool_urls
+
+    # k3d writes its OWN random API port into the kubeconfig even when the k3d
+    # config pins one: measured on this stand, the load balancer published
+    # 6443 -> 57443 while the generated kubeconfig said 50950, and every kubectl
+    # call after a green `terraform apply` died with "connection refused" - the
+    # cluster was healthy, the file was wrong. Point it at the real port, and
+    # keep the merged ~/.kube/config in step as well.
+    $apiPort  = terraform output -raw api_port
+    $kubePath = $env:KUBECONFIG
+    $kubeText = Get-Content $kubePath -Raw
+    # 127.0.0.1, not 0.0.0.0: a kubeconfig whose server is `https://0.0.0.0:57443`
+    # makes kubectl on Windows hang in a TLS handshake, while the very same API
+    # answers `curl -k https://127.0.0.1:57443/healthz` with 401.
+    $fixed    = $kubeText -replace 'https://(0\.0\.0\.0|127\.0\.0\.1|localhost):\d+', "https://127.0.0.1:$apiPort"
+    if ($fixed -ne $kubeText) {
+        Set-Content -Path $kubePath -Value $fixed -NoNewline
+        Write-Host "    kubeconfig API address -> https://127.0.0.1:$apiPort" -ForegroundColor Yellow
+    }
 }
 finally {
     Pop-Location
@@ -450,9 +468,15 @@ if ($WithAIOps) {
     # Same tag as spec.template.spec.containers[0].image in 02-triage-bot-dep.yaml.
     $botImage = "triage-bot:0.1.0-m1"
     Write-Host "    Building $botImage from aiops\triage-bot\Dockerfile..." -ForegroundColor Cyan
-    docker build -t $botImage $botDir
-    if ($LASTEXITCODE -ne 0) {
-        throw "docker build failed for $botImage (exit $LASTEXITCODE)."
+    # `docker build` writes its progress to stderr, and with
+    # $ErrorActionPreference = "Stop" one stderr byte from a native command is a
+    # terminating error: the image was built and the script died before the
+    # import, leaving a deploy that looked finished with no bot in the cluster.
+    # The same trap as the probes at the top of this script, so the same helper.
+    $build = Invoke-QuietProbe -Command docker -KeepStderr `
+        -Arguments @("build", "-t", $botImage, $botDir)
+    if ($build.ExitCode -ne 0) {
+        throw "docker build failed for $botImage (exit $($build.ExitCode)): $($build.Output)"
     }
 
     # `k3d image import` writes its progress to stderr, and with

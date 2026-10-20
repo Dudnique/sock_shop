@@ -1070,4 +1070,40 @@ double-clicks it is code without tests. Both bugs were in behaviour that had not
 since it was written - the deploy "worked" because it was demonstrated from the middle. A green run
 of steps 1-4 says nothing about steps 5-8.
 
+---
+
+## 18. The stand that came back with the wrong API port, and a cold start that looked like a dead cluster
+
+**Symptom.** After a Docker/WSL restart `k3d cluster start sock-shop` failed with `ports are not
+available ... access permissions` on host port **56910**; `kubectl` was unreachable while all three
+nodes claimed to be healthy, and the agent containers exited with code **0** a minute after starting.
+
+**What the measurements said.**
+
+- `netsh interface ipv4 show excludedportrange protocol=tcp` showed **56897-56996** reserved, with the
+  cluster's random API port 56910 inside it. k3d publishes the API through the load balancer, so a
+  load balancer that cannot start means no `kubectl` at all - even with every node running.
+- `docker inspect` showed `k3d-sock-shop=invalid IP` on both agents: after the WSL restart they had
+  lost their network endpoints, and k3s exited with `failed to start networking: ... failed to find
+  interface with specified node ip`. A clean `exit(0)`, which is why the container looked "started
+  and then gone" instead of crashed.
+- `docker logs k3d-sock-shop-serverlb` showed the API proxied to `172.19.0.2/0.3/0.4` - agents
+  included - because `6443` had been pinned in the general `ports` list.
+
+**Fixes.**
+
+| What | Why |
+| ---- | --- |
+| terraform: `kubeAPI = { host = "127.0.0.1", hostIP = "0.0.0.0", hostPort = var.api_port }`, `api_port` default `"57443"` | `--api-port` in a k3d config is the `kubeAPI` block. A `6443` entry in `ports` makes the LB balance the API across agents, which run no API server - two requests out of three then fail with `TLS handshake timeout`. `hostPort` must be a **string**: the schema rejects a number (`Expected: string, given: integer`). |
+| `host = "127.0.0.1"` | A kubeconfig with `server: https://0.0.0.0:57443` hangs `kubectl` on Windows, while `curl -k https://127.0.0.1:57443/healthz` answers 401 on the same port. |
+| `deploy.ps1` normalises the kubeconfig server to `https://127.0.0.1:<api_port>` | k3d can still write its own address into the file. The cluster is healthy; the file is not. |
+| `deploy.ps1` runs `docker build` through `Invoke-QuietProbe` | `docker build` writes progress to stderr, and `$ErrorActionPreference = "Stop"` turns one stderr byte into a terminating error *after* the image is built - the deploy died before `k3d image import` and `kubectl apply` and left a stand with no bot. |
+| HPA `scaleUp.stabilizationWindowSeconds: 30` -> **120** | Cold start: every JVM warms up at once, `carts` spends a minute at 183% of its 100m request, and a 30 s window is short enough for the HPA to take `carts` and `shipping` to five replicas each. Measured: the 7.5 GB Docker VM fell to **64 MB free**, load average **12**, `kubectl` timed out and `docker ps` stalled - a healthy cluster that looked dead. With 120 s both stay at one replica: ~3 GB available, load ~1. |
+
+The ordering matters: the port problem made the cluster unreachable, the HPA stampede made the
+Docker VM unresponsive, and each looked like the other. What separated them was measuring inside the
+node (`docker exec ... uptime`, `free -m`, `kubectl get hpa`) instead of asking the API that was
+already gone.
+
+
 

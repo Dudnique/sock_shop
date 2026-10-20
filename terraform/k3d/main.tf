@@ -22,6 +22,18 @@ resource "k3d_cluster" "sock_shop" {
     agents  = var.agents
     image   = var.k3s_image
 
+    # The API host port is pinned, and pinned the way k3d understands it: the
+    # `kubeAPI` block (`--api-port` on the CLI). Do NOT put `6443` into `ports`:
+    # measured on this stand, that made the load balancer route the API to every
+    # node - agents included - so two requests out of three hit a node with no
+    # API server and `kubectl` failed intermittently with `TLS handshake
+    # timeout`/`connection refused` while the cluster itself was healthy.
+    kubeAPI = {
+      host     = "127.0.0.1"
+      hostIP   = "0.0.0.0"
+      hostPort = var.api_port
+    }
+
     # Two kinds of published ports:
     #
     # 1) Ingress (Traefik, shipped by k3d) on the load balancer -> 80/443.

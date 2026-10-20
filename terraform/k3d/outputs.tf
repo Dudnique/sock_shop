@@ -23,6 +23,18 @@ output "kubeconfig_path" {
   value       = pathexpand(var.kubeconfig_path)
 }
 
+output "api_port" {
+  description = <<-EOT
+    Host port of the Kubernetes API on the load balancer.
+
+    Read by `deploy.ps1`. k3d writes its own random API port into the generated
+    kubeconfig even when the config pins one (measured: the container published
+    6443 -> 57443 while the kubeconfig said 50950), and every `kubectl` call then
+    fails with "connection refused" right after a green `terraform apply`.
+  EOT
+  value       = var.api_port
+}
+
 output "tool_urls" {
   description = "Host URLs of the tooling exposed via NodePorts (valid once the matching manifests are deployed)."
   value = {
