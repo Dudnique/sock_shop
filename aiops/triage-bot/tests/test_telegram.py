@@ -229,6 +229,80 @@ class DocumentTests(unittest.TestCase):
         self.assertFalse(client.send_document("x.md", "# x"))
 
 
+class PendingUpdatesTests(unittest.TestCase):
+    """A fresh journal must not replay button presses from cards it lost.
+
+    The journal is a PVC now, but a rebuilt cluster gives it an empty volume,
+    and `state.json` (which holds the Telegram offset) goes with it. Telegram
+    keeps unconfirmed updates for 24 hours, so without the drain a restart
+    answers yesterday's buttons with "инцидент не найден".
+    """
+
+    def _client(self) -> TelegramClient:
+        settings = make_settings(telegram_chat_id="42")
+        token_file = Path(tempfile.mkdtemp()) / "token"
+        token_file.write_text("123:ABC", encoding="utf-8")
+        settings.telegram_token_file = str(token_file)
+        return TelegramClient(settings)
+
+    @staticmethod
+    def _respond(result):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                return json.dumps({"ok": True, "result": result}).encode()
+
+        return FakeResponse()
+
+    def _with_urlopen(self, fake, call):
+        original = telegram_mod.urllib.request.urlopen
+        telegram_mod.urllib.request.urlopen = fake
+        try:
+            return call()
+        finally:
+            telegram_mod.urllib.request.urlopen = original
+
+    def test_the_newest_pending_update_is_confirmed(self) -> None:
+        client = self._client()
+        seen: dict = {}
+
+        def fake_urlopen(request, timeout=30):
+            seen.update(json.loads(request.data.decode("utf-8")))
+            return self._respond([{"update_id": 41}, {"update_id": 42}])
+
+        offset = self._with_urlopen(fake_urlopen, client.drain_pending)
+
+        self.assertEqual(offset, 43)
+        # -1 is the whole trick: ask for the newest update only, then confirm
+        # it - Telegram drops everything older on its own.
+        self.assertEqual(seen["offset"], -1)
+        self.assertEqual(seen["timeout"], 0)
+
+    def test_an_empty_queue_starts_at_zero(self) -> None:
+        client = self._client()
+        offset = self._with_urlopen(
+            lambda request, timeout=30: self._respond([]), client.drain_pending)
+        self.assertEqual(offset, 0)
+
+    def test_a_failed_drain_returns_none(self) -> None:
+        # None, not 0: the caller must leave state.json unwritten so the next
+        # start tries again. Writing 0 would silently give up the protection.
+        def fake_urlopen(request, timeout=30):
+            raise telegram_mod.urllib.error.URLError("network is down")
+
+        client = self._client()
+        self.assertIsNone(self._with_urlopen(fake_urlopen, client.drain_pending))
+
+    def test_a_disabled_client_does_not_ask(self) -> None:
+        client = TelegramClient(make_settings(telegram_chat_id=""))
+        self.assertEqual(client.drain_pending(), 0)
+
+
 class RateLimitTests(unittest.TestCase):
     def test_messages_are_suppressed_above_the_hourly_ceiling(self) -> None:
         settings = make_settings(telegram_chat_id="42", telegram_max_per_hour=2)

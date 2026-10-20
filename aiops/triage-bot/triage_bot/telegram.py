@@ -234,6 +234,34 @@ class TelegramClient:
                             timeout=timeout + 10)
         return result if isinstance(result, list) else []
 
+    def drain_pending(self):
+        """Confirm updates that arrived while this journal did not exist.
+
+        `state.json` dies with the journal - a fresh PVC after a cluster rebuild
+        starts at offset 0 - and Telegram keeps unconfirmed updates for 24 hours.
+        Without this call the first poll replays button presses from cards whose
+        incidents are gone, and a restart is greeted with a burst of "инцидент
+        не найден" instead of silence. `offset=-1` returns only the newest
+        pending update; confirming it drops everything older.
+
+        Returns the offset to start from, or None when Telegram could not be
+        asked - the caller then leaves `state.json` unwritten and tries again
+        on the next start instead of silently losing the protection forever.
+        """
+        if not self.enabled:
+            return 0
+        try:
+            updates = self.get_updates(-1, timeout=0)
+        except TelegramError as exc:
+            log.warning("getUpdates (drain) failed: %s - retrying on the next start", exc)
+            return None
+        if not updates:
+            return 0
+        newest = max(int(update.get("update_id", -1)) for update in updates)
+        log.info("fresh journal: %s pending update(s) skipped, offset=%s",
+                 len(updates), newest + 1)
+        return newest + 1
+
     # --- polling loop --------------------------------------------------------
     def poll_loop(self, on_callback, on_message, state, stop_event,
                   save_state=None) -> None:

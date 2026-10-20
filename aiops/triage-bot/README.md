@@ -393,7 +393,10 @@ also validated by `kubeconform -strict`.
   pod restart (`/data` is the `triage-bot-journal` PVC), the cache does not; the
   journal is the source of truth, and it is what `/incidents` reads. It was an
   `emptyDir` once, and the cards outlived their data: buttons on yesterday's
-  message answered "incident not found", `📄 отчёт` included.
+  message answered "incident not found", `📄 отчёт` included. A rebuilt cluster
+  starts from an empty volume by design; on that first start the bot confirms the
+  Telegram updates it missed instead of answering them, so presses made while it
+  was down do not become a burst of "incident not found".
 * **No authentication on the webhook** - the NetworkPolicy is the credential, as
   in the alerting stack.
 * **The ruleset knows only the alerts this stand fires.** A new alert is a new row

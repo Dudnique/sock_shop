@@ -72,6 +72,16 @@ def main() -> int:
             pass
 
     state = journal.load_state()
+    if not journal.state_path.exists():
+        # A fresh journal means a fresh PVC (first deploy, or the cluster was
+        # rebuilt): the offset restarts at 0 while Telegram still holds up to
+        # 24 hours of unconfirmed updates. Those point at cards whose incidents
+        # are gone, so confirm them without acting - otherwise a restart is
+        # greeted with a burst of "инцидент не найден" messages.
+        drained = telegram.drain_pending()
+        if drained is not None:
+            state["telegram_offset"] = drained
+            journal.save_state(state)
     poller = threading.Thread(
         target=telegram.poll_loop,
         args=(pipeline.handle_callback, pipeline.handle_message, state, stop_event),

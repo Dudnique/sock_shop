@@ -1148,3 +1148,30 @@ interface is a guess - the guess was wrong for 40 minutes of cluster time and ev
 
 
 
+
+## 20. A restart must not answer yesterday's buttons
+
+**Symptom (latent).** Nothing was observed - the landmine was found by reading the restart path instead
+of waiting for the next demo. With `/data` on a PVC the journal survives a pod recreate, but a rebuilt
+cluster (`deploy.ps1 -Down`) starts from an empty volume: `state.json`, and with it `telegram_offset`,
+is gone.
+
+**Why that matters.** Telegram keeps unconfirmed updates for 24 hours. A fresh `state.json` means
+`offset = 0`, so the first poll after a rebuild receives every button press made while the bot was down -
+and each one points at an incident the fresh journal has never seen. The bot would greet its first
+second of life with a burst of "инцидент не найден" messages.
+
+**Fix.** `TelegramClient.drain_pending()` calls `getUpdates` with `offset = -1` (the newest pending update
+only) and returns `update_id + 1`; confirming that id makes Telegram drop everything older. `__main__.py`
+calls it **only when `state.json` does not exist**, because an existing journal means the offset is real
+and late presses must still be answered. If Telegram cannot be reached the method returns `None` and
+`state.json` is left unwritten, so the next start tries again - writing 0 would silently give up the
+protection.
+
+**Measured.** After the rebuild `state.json` exists on the PVC, owned by `uid 65534` (`drwxrwxrwx` comes
+from `local-path`). That also proves the journal is writable by the non-root container: "the pod is
+Running" only ever proved that `mkdir` had succeeded.
+
+**Trade-off.** A rebuilt cluster loses the journal, and that is the right default - the journal is
+history, not configuration. Cards that outlive it answer with the explanation instead of a report.
+
