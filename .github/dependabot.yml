@@ -45,7 +45,12 @@ updates:
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
-    directory: /openapi
+    # The sources were archived into legacy/ with the rest of the AWS-era stack
+    # (commit d7e2458). Pointing at the old root paths made every Dependabot run
+    # fail with "couldn't find a Dockerfile", so the pins silently stopped being
+    # updated. They are still worth tracking: the release job continues to build
+    # and publish these two images on a v* tag.
+    directory: /legacy/openapi
     schedule:
       interval: weekly
       day: monday
@@ -53,7 +58,7 @@ updates:
       prefix: "build(deps)"
 
   - package-ecosystem: docker
-    directory: /healthcheck
+    directory: /legacy/healthcheck
     schedule:
       interval: weekly
       day: monday
