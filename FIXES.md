@@ -1192,6 +1192,61 @@ nothing to log`. A `desired=1` and a missing series both keep the old sentence -
 
 **Tests.** `tests/test_context.py` asserts both directions: at zero the card must say "scaled to 0" and
 must not say "no log lines"; a live-but-silent deployment and an unanswered query keep the plain
-wording. Not measured live yet - the running stand still has the previous image, and rebuilding it is
-the next step rather than a claim.
+wording. Measured live on the rebuilt stand: a deployment at `replicas=0` printed `loki: no pods - the
+deployment is scaled to 0 (desired=0), so there is nothing to log`, while the live `sock-shop/front-end`
+(`replicas_desired=1`) and a deployment that does not exist (no series) kept the plain wording.
+
+---
+
+## 22. The stand that did not survive `docker stop` + `docker start`, and how to stop it now
+
+**Symptom.** After the four k3d containers were stopped and Docker Desktop restarted (or `wsl
+--shutdown` run), `kubectl` stopped answering (`TLS handshake timeout` / `connection refused`), `docker
+ps` sometimes answered `500 Internal Server Error`, the load balancer exited with code **1** and the
+agent containers with code **0**.
+
+**Measurements (all on this stand).**
+
+| Layer | Measurement |
+| ----- | ----------- |
+| VM | load average **355**, `Mem 7389/7554`, **68 MB** available - the same shape as section 17 |
+| `docker inspect agent-0` | `EndpointID: ""`, `IPAddress: ""` - the endpoint was lost with the VM restart |
+| `docker logs agent-0` | `failed to start networking: ... failed to find interface with specified node ip`, then a clean `exit(0)` |
+| `docker logs serverlb` | `host not found in upstream "k3d-sock-shop-agent-0:443"` - nginx resolves **every** node while building its config |
+| `docker inspect -f '{{.NetworkSettings.Networks.k3d-sock-shop.IPAddress}}'` | `bad character U+002D '-'` - a Go template identifier cannot contain a hyphen, so the obvious way to read the address does not work at all |
+
+**Cause.** Two things at once. First: k3d creates the containers with `unless-stopped`, so Docker starts
+all four together, and a 7.5 GB VM does not survive three k3s nodes coming up while they replay their
+snapshots. Second: after a VM restart a stopped container comes back with an empty network endpoint, k3s
+does not find its interface and exits with code 0 - it looks like it started and vanished - and without
+the agents the load balancer refuses to start, so `127.0.0.1:57443` is never published and `kubectl`
+stays silent while the server is perfectly alive.
+
+**What was changed.**
+
+| Change | Why |
+| ------ | --- |
+| `deploy.ps1` step 1b: `docker update --restart=no` on the four containers | A Docker restart no longer starts a stampede: the stand stays stopped until somebody asks for it |
+| `deploy\stand.ps1 -Stop` | Stops the agents, then the server, then the load balancer - by SIGTERM (`Exited (143)`), so k3s writes its snapshot |
+| `deploy\stand.ps1 -Start` | Load balancer, server, a `/readyz` gate asked inside the server, then one agent at a time with a `Ready` gate and a "still running after 10 s" check, then the load balancer last |
+| Why the balancer is last | Its nginx resolves every node name at startup: started before the agents it dies with `host not found in upstream`, and `127.0.0.1:57443` never appears |
+| Why the API is asked inside the server | Before the balancer runs the kubeconfig is useless (it publishes the port), while the server container carries `kubectl` and its own credentials |
+| Endpoint repair: `network disconnect -f` + `network connect` | An empty endpoint is the only reason for the `exit(0)`; the address is deliberately **not** pinned: k3s accepts whatever address the interface has, while pinning the old one collides with whichever container took it in the meantime |
+| Start retried once on `Address already in use` | `docker start` restores the endpoint recorded in the container config, and that record can name an address another node owns by now; rebuilding the endpoint clears it |
+| `-NoRebuild` and an automatic rebuild | If a node still refuses to come back, the honest path is to recreate the cluster (`deploy.ps1 -Down`, then `-WithAIOps`); `-Start` does that by itself, because "start it and have it work" matters more than "start it cheaply" |
+
+**How to stop and start now.**
+
+```powershell
+.\deploy\stand.ps1 -Stop -Free   # optionally drop logs/TSDB before stopping
+.\deploy\stand.ps1 -Status       # engine, VM, containers, nodes - changes nothing
+.\deploy\stand.ps1 -Start        # in order; rebuilds by itself if a node does not return
+```
+
+**The limitation worth knowing.** A k3d node on Docker Desktop may not survive a VM restart: the
+endpoint is gone and k3s does not always agree to start again. `-Start` therefore not only starts
+containers, it can also rebuild the stand; the bot's journal lives on a PVC of the old cluster, so a
+rebuilt stand starts with an empty journal. That is written down here so that "empty journal after a
+rebuild" does not look like a bug.
+
 

@@ -174,8 +174,10 @@ try {
     if (-not $engineAnswered) {
         throw ("The Docker engine did not answer within 15 s, so nothing was deployed: the " +
                "containers may still be listed, but the VM behind them is not serving. Recover with " +
-               "'wsl --shutdown', start Docker Desktop, then '.\\deploy.ps1 -Down' and '.\\deploy.ps1'. " +
-               "'deploy\\diagnose-stand.ps1' says which of the three failures it is (FIXES.md, section 17).")
+               "'wsl --shutdown', start Docker Desktop, then '.\\deploy\\stand.ps1 -Start' if the " +
+               "cluster is intact (it starts one node at a time) or '.\\deploy.ps1 -Down' + " +
+               "'.\\deploy.ps1' if it is not. 'deploy\\diagnose-stand.ps1' says which of the three " +
+               "failures it is (FIXES.md, section 17).")
     }
     if ($engineOutput -match '(\d+\.\d+[^\|]*)\|(\d+)') {
         $engineVersion = $matches[1].Trim()
@@ -249,6 +251,22 @@ Write-Host "    KUBECONFIG=$env:KUBECONFIG"
 
 Write-Host "    Waiting for nodes to be ready..." -ForegroundColor Cyan
 kubectl wait --for=condition=Ready node --all --timeout=180s | Out-Null
+
+# --- 1b. Never let the four k3d containers start together ---------------------
+# k3d creates them with `unless-stopped`, so a Docker Desktop restart starts the
+# load balancer, the server and both agents in the same second while k3s replays
+# its snapshot. Measured on this stand: load average 355 on a 7.5 GB VM, 68 MB
+# free, `docker ps` answering 500 and every `kubectl` call dying at the TLS
+# handshake - the cluster looked dead while it was only starving (FIXES.md,
+# section 22). With the policy at `no`, starting the stand becomes the explicit
+# `deploy\stand.ps1 -Start`, which starts one node at a time and waits.
+$k3dContainers = @(docker ps --filter "name=k3d-sock-shop" --format "{{.Names}}" 2>$null |
+    Where-Object { $_ -match '^k3d-sock-shop-' })
+if ($k3dContainers.Count -gt 0) {
+    docker update --restart=no $k3dContainers | Out-Null
+    Write-Host ("    restart policy -> no on {0} k3d container(s); start the stand with " +
+                "deploy\stand.ps1 -Start" -f $k3dContainers.Count) -ForegroundColor Gray
+}
 
 # --- 2. Application ---------------------------------------------------------
 Write-Host "==> 2/8 Application (sock-shop)" -ForegroundColor Cyan

@@ -312,13 +312,25 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 .\deploy.ps1 -Down             # tear the whole stand down (terraform destroy)
 ```
 
-Or, to only pause the cluster:
+Or, to only pause the stand:
 
 ```powershell
-k3d cluster stop sock-shop     # stop
-k3d cluster start sock-shop    # start again
-k3d cluster delete sock-shop   # remove entirely
+.\deploy\stand.ps1 -Stop -Free   # stop the nodes in order; -Free drops the grown logs/TSDB first
+.\deploy\stand.ps1 -Status       # engine, VM, containers, nodes - changes nothing
+.\deploy\stand.ps1 -Start        # start them one at a time, waiting for the API and for each node
 ```
+
+Do not `docker stop k3d-sock-shop-*` and expect `docker start` to bring the stand back. k3d creates
+those containers with the `unless-stopped` policy, so a Docker restart starts all four at once
+(measured: load average 355 and 68 MB free on a 7.5 GB VM), and a container that lost its network
+endpoint to a VM restart makes k3s exit with code 0 - the node looks like it started and vanished, the
+load balancer cannot resolve it, and `kubectl` times out while the server is fine. `stand.ps1` handles
+both: it sets the policy to `no`, starts the server first, the agents one at a time and the load
+balancer last, and if a node still refuses to come back it rebuilds the cluster with `deploy.ps1`
+(FIXES.md, section 22).
+
+`k3d cluster delete sock-shop` still exists, but `.\deploy.ps1 -Down` is the supported way to remove the
+cluster, because terraform keeps the state.
 
 If the stand does not come back - `kubectl` times out, `docker ps` hangs, the machine is slow - do
 not debug it in place. `deploy\diagnose-stand.ps1` tells apart the three failures that all look like
@@ -329,9 +341,12 @@ A wedged VM is killed with `wsl --shutdown` (`docker stop` hangs in that state).
 not recover is replaced with `.\deploy.ps1 -Down` followed by `.\deploy.ps1 -WithAIOps`.
 
 What the stand accumulates while it runs is a different problem, and it does not need a rebuild.
-Nothing is stored on a volume - Prometheus, Loki and the bot's journal all use `emptyDir` - and the
-bot only ever reads the last 15 minutes of logs, so what grows is data nobody asked for: log chunks,
-TSDB blocks, containerd image layers and finished pods.
+Prometheus and Loki keep their data in `emptyDir` and the bot only ever reads the last 15 minutes of
+logs, so what grows is data nobody asked for: log chunks, TSDB blocks, containerd image layers and
+finished pods. The one thing that does survive a restart is the triage bot's journal on the
+`triage-bot-journal` PVC (`local-path`): it is the audit trail, so it is kept - and because
+`local-path` binds a volume to the node that created it, the bot's pod stays on that node for the life
+of the cluster, and a rebuilt cluster starts with a new, empty journal.
 
 ```powershell
 .\deploy\cleanup-stand.ps1                  # ~30 s: finished pods, unused images, Loki/Prometheus data
