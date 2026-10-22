@@ -191,6 +191,11 @@ jobs:
   #      schemas, exactly like the manifests-validate job does for the raw
   #      manifests. This keeps the two deploy paths (plain YAML and Helm) equally
   #      verified.
+  #    - Finally the rendered chart is compared with manifests/ object by object
+  #      (check-parity.py: replicas, resources, image). "Both sides render and
+  #      validate" is not the same as "both sides describe the same pod", and that
+  #      gap is how the chart drifted to 2000Mi of memory requests per JVM service
+  #      (~10 GiB in total, on an 8 GB stand) with CI green throughout.
   # ---------------------------------------------------------------------------
   helm-chart-validate:
     runs-on: ubuntu-latest
@@ -207,6 +212,11 @@ jobs:
         helm template sock-shop deploy/kubernetes/helm-chart > rendered.yaml
         docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:latest \
           -strict -summary -ignore-missing-schemas /work/rendered.yaml
+    - name: Compare the rendered chart with manifests/
+      run: |
+        python3 -m pip install --quiet pyyaml
+        python3 deploy/kubernetes/helm-chart/check-parity.py rendered.yaml \
+          deploy/kubernetes/manifests
 
   # ---------------------------------------------------------------------------
   # 5) Terraform static checks (no cloud and no Docker required).

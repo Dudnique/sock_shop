@@ -1,6 +1,12 @@
 # Default values for sock-shop.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
+#
+# `replicas`, `resources` and the container image here must describe the same pod
+# as `manifests/`: the chart is the same objects written a second time, and CI
+# compares the two with `check-parity.py`. These numbers are the measured ones -
+# the four JVM services used to request 2000Mi each in this file, i.e. ~10 GiB of
+# requests for a stand that has 8 GB of memory in total.
 global:
     registry: ''
 
@@ -22,13 +28,10 @@ cartsdb:
     image:
         repo: mongo
         tag: 4.4.0
-    resources:
-        requests:
-            cpu: 500m
-            memory: 512Mi
-        limits:
-            cpu: 500m
-            memory: 512Mi
+    # Empty on purpose: manifests/06-carts-db-dep.yaml sets no requests or limits on
+    # the datastores, and the chart has to describe the same pods. Requests are not
+    # free - the scheduler admits pods on them, and this stand has 8 GB in total.
+    resources: {}
     persistentVolume:
         storageClass: ''
         size: 512Mi
@@ -41,22 +44,16 @@ carts:
     resources:
         limits:
             cpu: 300m
-            memory: 2000Mi
+            memory: 500Mi
         requests:
-            cpu: 300m
-            memory: 2000Mi
+            cpu: 100m
+            memory: 200Mi
 
 cataloguedb:
     image:
         repo: weaveworksdemos/catalogue-db
         tag: 0.3.0
-    resources:
-        limits:
-            cpu: 300m
-            memory: 1000Mi
-        requests:
-            cpu: 100m
-            memory: 300Mi
+    resources: {}
 
 catalogue:
     image:
@@ -65,8 +62,8 @@ catalogue:
     containerPort: 80
     resources:
         limits:
-            cpu: 100m
-            memory: 100Mi
+            cpu: 200m
+            memory: 200Mi
         requests:
             cpu: 100m
             memory: 100Mi
@@ -102,13 +99,7 @@ ordersdb:
     image:
         repo: mongo
         tag: 4.4.0
-    resources:
-        requests:
-            cpu: 500m
-            memory: 512Mi
-        limits:
-            cpu: 500m
-            memory: 512Mi
+    resources: {}
     persistentVolume:
         storageClass: ''
         size: 512Mi
@@ -121,10 +112,10 @@ orders:
     resources:
         limits:
             cpu: 500m
-            memory: 2000Mi
+            memory: 500Mi
         requests:
-            cpu: 200m
-            memory: 2000Mi
+            cpu: 100m
+            memory: 300Mi
 
 payment:
     image:
@@ -132,12 +123,14 @@ payment:
         tag: 0.4.3
     declinePaymentsOverAmount: 200
     containerPort: 8080
+    # 99m, not 100m: manifests/15-payment-dep.yaml says 99m and the two paths have
+    # to render the same pod, oddity included.
     resources:
         limits:
-            cpu: 100m
-            memory: 100Mi
+            cpu: 200m
+            memory: 200Mi
         requests:
-            cpu: 100m
+            cpu: 99m
             memory: 100Mi
 
 queuemaster:
@@ -147,34 +140,22 @@ queuemaster:
     resources:
         limits:
             cpu: 300m
-            memory: 1000Mi
+            memory: 500Mi
         requests:
-            cpu: 300m
-            memory: 1000Mi
+            cpu: 100m
+            memory: 300Mi
 
 rabbitmq:
     image:
         repo: rabbitmq
         tag: 3.6.8
-    resources:
-        requests:
-            memory: 256Mi
-            cpu: 350m
-        limits:
-            memory: 512Mi
-            cpu: 1
+    resources: {}
 
 sessiondb:
     image:
         repo: redis
         tag: alpine
-    resources:
-        requests:
-            memory: 256Mi
-            cpu: 250m
-        limits:
-            memory: 256Mi
-            cpu: 250m
+    resources: {}
     persistentVolume:
         storageClass: ''
         size: 512Mi
@@ -187,22 +168,16 @@ shipping:
     resources:
         limits:
             cpu: 300m
-            memory: 2000Mi
+            memory: 500Mi
         requests:
-            cpu: 300m
-            memory: 2000Mi
+            cpu: 100m
+            memory: 300Mi
 
 userdb:
     image:
         repo: weaveworksdemos/user-db
         tag: 0.4.0
-    resources:
-        limits:
-            cpu: 300m
-            memory: 1000Mi
-        requests:
-            cpu: 100m
-            memory: 300Mi
+    resources: {}
 
 user:
     image:
@@ -212,10 +187,10 @@ user:
     resources:
         limits:
             cpu: 300m
-            memory: 1000Mi
+            memory: 200Mi
         requests:
             cpu: 100m
-            memory: 400Mi
+            memory: 100Mi
 
 zipkincron:
     image:

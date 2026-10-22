@@ -27,7 +27,7 @@ point: the interesting work here is the *shape* of the platform, not the traffic
 | All three observability pillars wired end to end: 11 alert rules in 4 groups, 7 dashboards, 3 data sources | Production durability: Prometheus TSDB is on `emptyDir`, Jaeger is in-memory, Loki keeps a few days on a `hostPath` |
 | Alerts that carry `namespace/deployment/pod` and a runbook command, delivered to Telegram **and** Slack | An on-call rota, escalation policy, error budgets or SLO reporting |
 | An AIOps triage bot that validates LLM output against a whitelist and acts only through a scoped ServiceAccount | Anything touching real user data: no PII, no payment integration, no real customers |
-| 136 automated tests for the bot, plus CI gates (`kubeconform`, `yamllint`, `helm lint`, `terraform validate`, `promtool`) | A secret store: `Secret` objects plus a git-ignored local file, no Vault, no sealed-secrets |
+| 136 automated tests for the bot, plus CI gates (`kubeconform`, `helm lint`, chart↔manifest parity, `terraform validate`, `promtool`) | A secret store: `Secret` objects plus a git-ignored local file, no Vault, no sealed-secrets |
 | Incidents found and fixed on the way, written up with the reasoning ([FIXES.md](./FIXES.md)) | Proof that you can carry a pager. A lab cannot prove that, and it should not pretend to |
 
 Everything above is deliberate scoping, not a gap I am unaware of.
@@ -281,8 +281,13 @@ working, because the chart labels its pods `name: <service>` exactly like
 Three limits are worth knowing before choosing this path:
 
 - `manifests/` stays the source of truth. The chart is the same objects written a
-  second time, so a change lands in both or it is a bug. CI catches rendering and
-  schema errors on both sides, not semantic drift between them.
+  second time, so a change lands in both or it is a bug. On top of `helm lint` and
+  `kubeconform` - which only prove that each side is valid on its own - CI compares
+  the two (`deploy/kubernetes/helm-chart/check-parity.py`: replicas, resources and
+  image for all 14 workloads). Four image differences are allowlisted there, because
+  neither side is obviously right: `mongo` vs `mongo:4.4.0` for the two Mongo
+  datastores, `rabbitmq:3.6.8-management` vs `rabbitmq:3.6.8`, and
+  `user-db:0.3.0` vs `0.4.0`.
 - Install into a **fresh** cluster. `helm` refuses to adopt objects that an earlier
   `kubectl apply` created (`invalid ownership metadata`), so switching paths on a
   live stand means `.\deploy.ps1 -Down` first.
@@ -290,6 +295,12 @@ Three limits are worth knowing before choosing this path:
   starts at 360 s), so `--wait` needs about six minutes. The raw manifests probe
   the four services that expose `/health` and rely on `availableReplicas` for the
   rest, which is why the manifest path reports Ready sooner.
+
+Both paths ask for the same **1.7 GiB** of memory in total. That equality is
+checked, not assumed: the chart used to request `2000Mi` on each of the four JVM
+services - 10 GiB of requests on a stand that has 8 GB - while every CI run stayed
+green, because "the chart renders" and "the chart describes the same pod" are two
+different claims (`FIXES.md` §23).
 
 ## Accessing the application and tools
 
@@ -397,6 +408,7 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 │       ├── autoscaling/                    # HPA v2 for the stateless services (+ legacy/)
 │       ├── complete-demo.yaml              # application in one file
 │       └── helm-chart/                     # alternative: Helm chart (application only)
+│           └── check-parity.py             # CI: the chart must describe the same pods as manifests/
 ├── terraform/
 │   └── k3d/                                # declarative definition of the cluster
 └── legacy/                                 # archived upstream material, never deployed

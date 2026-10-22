@@ -1289,4 +1289,79 @@ containers, it can also rebuild the stand; the bot's journal lives on a PVC of t
 rebuilt stand starts with an empty journal. That is written down here so that "empty journal after a
 rebuild" does not look like a bug.
 
+## 23. The Helm chart that asked for 10 GiB on an 8 GB stand, and the CI gate that could not see it
+
+**Symptom.** None, which is the problem. The stand was healthy, `helm lint --strict`
+was green, `helm template | kubeconform` was green, and the chart's values had drifted
+away from `manifests/` to the point where the two deploy paths no longer described the
+same pods. It would have surfaced on the first `.\deploy.ps1 -Helm` - the one path this
+repository has never run end-to-end.
+
+**Measurements.** `helm template` against `manifests/`, workload by workload:
+
+| Workload | `manifests/` (requests) | chart, before (requests) |
+| -------- | ----------------------- | ------------------------ |
+| `carts` | 100m / 200Mi | 300m / **2000Mi** |
+| `orders` | 100m / 300Mi | 200m / **2000Mi** |
+| `shipping` | 100m / 300Mi | 300m / **2000Mi** |
+| `queue-master` | 100m / 300Mi | 300m / **1000Mi** |
+| `user` | 100m / 100Mi (limit 300m / 200Mi) | 100m / **400Mi** (limit 1000Mi) |
+| `catalogue` | 100m / 100Mi, limit 200m | limit **100m** |
+| `payment` | 99m / 100Mi, limit 200m | limit **100m** |
+| `carts-db`, `orders-db` | nothing | 500m / 512Mi |
+| `catalogue-db`, `user-db` | nothing | 100m / 300Mi, limit 300m / 1000Mi |
+| `session-db` | nothing | 250m / 256Mi |
+| `rabbitmq` | nothing | 350m / 256Mi, limits **1 CPU** / 512Mi |
+
+13 of 14 workloads disagreed, and the total was **10036 MiB of memory requests in the
+chart against 1700 MiB in `manifests/`** - on a VM whose ceiling is 7942 MiB. Four
+images had drifted too: `mongo` vs `mongo:4.4.0` (twice), `rabbitmq:3.6.8-management`
+vs `rabbitmq:3.6.8`, and `user-db:0.3.0` vs `0.4.0`.
+
+**Cause.** Two independent histories in one repository. The chart is upstream's
+Weaveworks chart, kept as shipped; `manifests/` is where every measurement of §14, §18
+and §22 landed - the `availableReplicas` probes, the `maxReplicas: 2` cap, the
+200-300Mi requests that make 8 GB enough. The two never met, and nothing compared them:
+`helm lint` and `kubeconform` ask whether each side renders and validates **on its
+own**, and both answers were yes. The README even documented the hole - "CI catches
+rendering and schema errors on both sides, not semantic drift between them" - which is
+honest, but honesty is not a gate.
+
+`requests == limits` on those four services also means Guaranteed QoS with a 2 GiB
+memory ceiling each, and the CPU requests change autoscaling itself: an HPA scales on a
+percentage of the request, so `300m` instead of `100m` makes the same autoscaler three
+times slower to react to the same load (§14 is where that arithmetic was measured).
+
+**What was changed.**
+
+| Change | Why |
+| ------ | --- |
+| `values.yaml`: `carts`, `orders`, `shipping`, `queue-master`, `user`, `catalogue` and `payment` aligned with `manifests/` | The two paths have to describe the same pod, and the manifests are the numbers measured on this stand |
+| `values.yaml`: the 7 datastores got `resources: {}` | `manifests/` sets nothing on them, and a request is not free - the scheduler admits pods on it |
+| `payment`'s `99m` copied verbatim, with a comment | "The same objects" includes the oddities; a checker that tolerated 99m vs 100m would tolerate the next 2000Mi |
+| New `deploy/kubernetes/helm-chart/check-parity.py` | Compares replicas, resources and image per workload, exits 1 on any disagreement |
+| CI: `Compare the rendered chart with manifests/` in `helm-chart-validate` (`pip install pyyaml`, then the script on the file the previous step already rendered) | Turns "the two paths describe the same pods" into a gate instead of a promise |
+| The 4 known image differences allowlisted **inside the script, each with its reason** | They are real disagreements that need a `-Helm` run to settle; the checker still fails on any *new* one |
+| `yamllint` removed from the CI-gates list in `README.md` | `git grep yamllint` finds it only in the two READMEs - no workflow ever ran it. A gate that does not exist is the same failure class as a chart that does not describe the same pods |
+
+**Verified on this checkout.**
+
+| Check | Result |
+| ----- | ------ |
+| `helm lint deploy/kubernetes/helm-chart --strict` | exit 0, `1 chart(s) linted, 0 chart(s) failed` |
+| `helm template sock-shop deploy/kubernetes/helm-chart` | exit 0, 29 resources |
+| `kubeconform -strict -summary` on the rendered file, CI's own image, run locally | `29 resources found ... Valid: 29, Invalid: 0, Errors: 0` |
+| `check-parity.py rendered.yaml deploy/kubernetes/manifests` | exit 0, `agree on 14 workload(s): replicas, resources and image (4 allowlisted image difference(s))` |
+| The same script against a deliberately broken render (`--set carts.resources.requests.memory=2000Mi`) | exit 1, `Deployment/carts: resources differ` with both dicts - a checker that cannot fail is a rubber stamp |
+| Total memory requests, both paths | 1700 MiB each, down from 10036 MiB in the chart |
+
+**The limitation worth knowing.** The chart path still has never been installed
+end-to-end: `helm` refuses to adopt objects that an earlier `kubectl apply` created, so
+`.\deploy.ps1 -Helm` needs a fresh cluster, and that run is what would settle the four
+image questions. The checker also compares only replicas, resources and image - probes,
+env and ports are not compared, because the chart deliberately keeps the upstream 360 s
+readiness timings while the manifests do not.
+
+
+
 
