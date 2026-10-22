@@ -9,7 +9,7 @@
 #    exactly the pins that had to be bumped by hand when GitHub retired the
 #    node20 runner (commit 05cd3bb), so this is the highest-value ecosystem here.
 #  - terraform: the provider/version pins under terraform/.
-#  - docker: the two helper images built from this repo (openapi/, healthcheck/).
+#  - docker: the two helper images built from this repo (legacy/openapi/, legacy/healthcheck/).
 #
 # MAJOR updates are intentionally NOT opened: a new major of an action, provider
 # or base image changes behaviour (runtimes, defaults, removed arguments) and is

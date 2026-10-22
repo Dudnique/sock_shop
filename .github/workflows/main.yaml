@@ -239,6 +239,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # 6) Build and push the openapi / healthcheck helper images.
   #
+  #    The sources live under legacy/ (archived together with the rest of the
+  #    AWS-era stack), but the images keep their original names on a release tag,
+  #    so the build context points there. Without this a v* tag fails with
+  #    "context not found" while every branch push stays green - the worst kind of
+  #    breakage, because it only shows up at release time.
+  #
   #    Release-only job: it publishes real images to Docker Hub, so it must NOT
   #    run on every push to the default branch. We deliberately gate it on
   #    version tags (v*) only:
@@ -269,7 +275,7 @@ jobs:
     - name: Build and push
       uses: docker/build-push-action@v7
       with:
-        context: ${{ matrix.repo }}
+        context: legacy/${{ matrix.repo }}
         push: true
         tags: ${{ env.GROUP }}/${{ matrix.repo }}:${{ github.sha }}
 
