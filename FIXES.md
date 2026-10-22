@@ -91,16 +91,16 @@ Now CI runs:
 - `manifests-validate` — fast offline validation of all manifests
   (`kubeconform -strict`), no cluster required.
 
-The original workflow is kept for history in `ci-legacy/main.yaml`.
+The original workflow is kept for history in `legacy/ci-legacy/main.yaml`.
 
 The Docker + `make` helper that used to generate and check `complete-demo.yaml` (the root
 `Makefile`, `deploy/kubernetes/Makefile` and `deploy/kubernetes/Dockerfile`) was archived
-in `ci-legacy/` for the same reason: the generation is a one-liner and CI performs the
+in `legacy/ci-legacy/` for the same reason: the generation is a one-liner and CI performs the
 check itself, so `make` - and the purpose-built image it needed - were pure overhead. The
-regeneration command is documented in `ci-legacy/README.md` and in
+regeneration command is documented in `legacy/ci-legacy/README.md` and in
 `deploy/kubernetes/README.md`.
 
-Two small housekeeping changes closed this section. With `ci-legacy/` set aside, the workflow
+Two small housekeeping changes closed this section. With `legacy/ci-legacy/` set aside, the workflow
 file is the only thing CI runs, so its pins became the ones that matter: retiring the node20
 runner had to be done by hand (commit `05cd3bb`), and `.github/dependabot.yml` now opens a
 weekly PR whenever an action, a Terraform provider or one of the two helper images
@@ -464,8 +464,8 @@ Two leftovers of the same class lived outside the Kubernetes path, and they were
 the same pass: "no credentials in files" is a property of the repository, not of one
 directory.
 
-- `deploy/docker-compose/docker-compose.monitoring.yml` hard-coded
-  `GF_SECURITY_ADMIN_PASSWORD=foobar`, and `deploy/docker-compose/grafana/import.sh` posted
+- `legacy/docker-compose/docker-compose.monitoring.yml` hard-coded
+  `GF_SECURITY_ADMIN_PASSWORD=foobar`, and `legacy/docker-compose/grafana/import.sh` posted
   to `http://admin:foobar@grafana:3000/...` - the very same default-credential pattern, in
   the stand's second (compose) entry point. The password now comes from
   `${GRAFANA_ADMIN_PASSWORD:?...}` (compose fails with an explicit message when it is
@@ -594,9 +594,12 @@ the target resolve.
 reports a CPU metric**, failing the run if it never arrives (the objects exist either way - that
 is exactly the trap being closed). The rationale for the numbers is in `autoscaling/README.md`:
 50% of `requests.cpu` is the only target that means the same thing across pods and nodes (every
-service here requests 100m); `maxReplicas: 5` is a three-node budget decision rather than a round
-number; up 2 pods / 30 s and down 1 pod / 60 s behind a 300 s stabilization window is what stops
-the classic flap. The 2018 stack that shipped next to these files - Heapster, InfluxDB, an old
+service here requests 100m); `maxReplicas` is a budget decision rather than a round
+number - 5 for the four Go/Node services, **2 for the four JVM ones** (§18 has the measurement:
+20 JVMs at ~320 MiB is 6.4 GB, more than the Docker VM owns). Upstream asked for `10` everywhere
+and the first rewrite cut that to 5 by counting *pods* (8 x 10 = 80 on three nodes); a pod budget
+is the wrong unit when four of the eight services are JVMs. Up 2 pods / 30 s and down 1 pod / 60 s
+behind a 300 s stabilization window is what stops the classic flap. The 2018 stack that shipped next to these files - Heapster, InfluxDB, an old
 Grafana - was moved to `autoscaling/legacy/` with a README saying what replaced it
 (metrics-server), because Heapster was removed from Kubernetes in 1.13 and applied by nobody.
 
@@ -621,8 +624,8 @@ down only moves the capacity problem somewhere else.
 
 **What is honestly still missing** (kept in the notes' weak-points section): no
 PodDisruptionBudget, so draining a node can still take every replica of a service at once; no
-VPA and no cluster capacity headroom, so `maxReplicas: 5 x 8 services` is a promise the three
-nodes could not keep; `queue-master` is CPU-scaled although its real signal is queue depth (the
+VPA and no cluster capacity headroom, so even `maxReplicas: 2 x 4 JVM services + 5 x 4 light
+services` is a promise the three nodes could not keep at once; `queue-master` is CPU-scaled although its real signal is queue depth (the
 honest next step is KEDA on RabbitMQ metrics, not a lower CPU target); and there is no node-level
 autoscaling, which on a laptop is a deliberate omission rather than an oversight.
 
@@ -1099,6 +1102,7 @@ nodes claimed to be healthy, and the agent containers exited with code **0** a m
 | `deploy.ps1` normalises the kubeconfig server to `https://127.0.0.1:<api_port>` | k3d can still write its own address into the file. The cluster is healthy; the file is not. |
 | `deploy.ps1` runs `docker build` through `Invoke-QuietProbe` | `docker build` writes progress to stderr, and `$ErrorActionPreference = "Stop"` turns one stderr byte into a terminating error *after* the image is built - the deploy died before `k3d image import` and `kubectl apply` and left a stand with no bot. |
 | HPA `scaleUp.stabilizationWindowSeconds: 30` -> **120** | Cold start: every JVM warms up at once, `carts` spends a minute at 183% of its 100m request, and a 30 s window is short enough for the HPA to take `carts` and `shipping` to five replicas each. Measured: the 7.5 GB Docker VM fell to **64 MB free**, load average **12**, `kubectl` timed out and `docker ps` stalled - a healthy cluster that looked dead. With 120 s both stay at one replica: ~3 GB available, load ~1. |
+| HPA `maxReplicas: 5` -> **2** for the four JVM services (`carts`, `orders`, `queue-master`, `shipping`) | The 120 s window covers a *deploy*, where pods appear a few at a time while images import. It does **not** cover a stand restart: all 30 pods start together, the four JVMs stay above target for longer than two minutes, and the HPA walks all four to 5 replicas - 20 JVMs at ~320 MiB RSS = ~6.4 GB. Measured after `stand.ps1 -Stop` then `-Start -NoRebuild`: **8989 MB used of 9946, 802 MB available**, load average **16-22**, held for ~8 minutes until the 300 s downscale window walked it back; `describe hpa` logged `FailedGetResourceMetric` throughout - a VM too busy to answer the metrics API cannot scale itself back down. With the cap at 2 the same restart peaks at 8 JVM pods ~2.6 GB. The four light Go/Node services keep 1..5, so the demo still shows a real 1 -> 2 rescale. |
 
 The ordering matters: the port problem made the cluster unreachable, the HPA stampede made the
 Docker VM unresponsive, and each looked like the other. What separated them was measuring inside the
@@ -1214,13 +1218,18 @@ agent containers with code **0**.
 | `docker logs agent-0` | `failed to start networking: ... failed to find interface with specified node ip`, then a clean `exit(0)` |
 | `docker logs serverlb` | `host not found in upstream "k3d-sock-shop-agent-0:443"` - nginx resolves **every** node while building its config |
 | `docker inspect -f '{{.NetworkSettings.Networks.k3d-sock-shop.IPAddress}}'` | `bad character U+002D '-'` - a Go template identifier cannot contain a hyphen, so the obvious way to read the address does not work at all |
+| `docker info` on the host | `MemTotal 7554 MB` - WSL2 defaults to **half** of the 15.2 GB host, so the ceiling was 7.6 GB while the stand had grown to 7.4 GB |
+| `kubectl get nodes` vs `docker inspect` | etcd still said `agent-1 = 172.19.0.3`, while Docker had restarted the container on `172.19.0.4`: the agent exits with `failed to find interface with specified node ip` even though its own endpoint is perfectly fine |
 
-**Cause.** Two things at once. First: k3d creates the containers with `unless-stopped`, so Docker starts
-all four together, and a 7.5 GB VM does not survive three k3s nodes coming up while they replay their
-snapshots. Second: after a VM restart a stopped container comes back with an empty network endpoint, k3s
-does not find its interface and exits with code 0 - it looks like it started and vanished - and without
-the agents the load balancer refuses to start, so `127.0.0.1:57443` is never published and `kubectl`
-stays silent while the server is perfectly alive.
+**Cause.** Three things at once. First: k3d creates the containers with `unless-stopped`, so Docker starts
+all four together, and the 7.6 GB VM that WSL2 hands out by default does not survive three k3s nodes
+coming up while they replay their snapshots. Second: after a VM restart a stopped container comes back
+with an empty network endpoint, k3s does not find its interface and exits with code 0 - it looks like it
+started and vanished - and without the agents the load balancer refuses to start, so `127.0.0.1:57443` is
+never published and `kubectl` stays silent while the server is perfectly alive. Third: even with the
+endpoint repaired, the agent may come back on a **different address** than the one its `Node` object in
+etcd recorded, and k3s refuses to start networking on an address that is not on any interface - so the
+node dies again, this time with a healthy endpoint.
 
 **What was changed.**
 
@@ -1233,7 +1242,23 @@ stays silent while the server is perfectly alive.
 | Why the API is asked inside the server | Before the balancer runs the kubeconfig is useless (it publishes the port), while the server container carries `kubectl` and its own credentials |
 | Endpoint repair: `network disconnect -f` + `network connect` | An empty endpoint is the only reason for the `exit(0)`; the address is deliberately **not** pinned: k3s accepts whatever address the interface has, while pinning the old one collides with whichever container took it in the meantime |
 | Start retried once on `Address already in use` | `docker start` restores the endpoint recorded in the container config, and that record can name an address another node owns by now; rebuilding the endpoint clears it |
+| `%USERPROFILE%\.wslconfig`: `memory=10GB`, `swap=2GB` | Removing the real ceiling instead of shrinking the stand: `docker info` now reports `MemTotal 10429034496` (9.7 GB), and a fresh stand uses ~4.6 GB of it. Small swap on purpose - enough for a spike, not enough to thrash |
+| `Reset-NodeRegistration` in `stand.ps1` | Deletes the stale `Node` object (`kubectl delete node`, asked **inside** the server) and retries the start, instead of declaring the cluster unrevivable. Only the `Node` object goes: the datastores keep their emptyDir contents inside their containers, and the pods reschedule |
+| `Start-NodeWithRetry` | Starts one agent, waits for it to stay running and reach `Ready`; on the stale-address failure it resets the registration exactly once and tries again - the case that used to end in a rebuild |
 | `-NoRebuild` and an automatic rebuild | If a node still refuses to come back, the honest path is to recreate the cluster (`deploy.ps1 -Down`, then `-WithAIOps`); `-Start` does that by itself, because "start it and have it work" matters more than "start it cheaply" |
+
+**Verified on this stand.** `.\\deploy\\stand.ps1 -Stop` then `.\\deploy\\stand.ps1 -Start -NoRebuild`:
+all four containers reconnected their endpoints, the three nodes were `Ready` within ~40 s, all 30 pods
+`Running`, the bot `Ready`, `http://localhost:8080/` answered **200** with 8688 bytes - **no rebuild**. The
+addresses came back identical (`172.19.0.2/.3/.4` for container and `Node` object alike), so the reset
+path did not have to fire; it is the safety net for the run where they do not match.
+
+**What the same restart cost in memory.** The pods came back, but the cold-start CPU spike (load average
+16-22) sent the four JVM services to 5 replicas each: **8989 MB of 9946 used, 802 MB available**, held for
+~8 minutes until the 300 s downscale window walked it back. The stand survived because the ceiling was
+raised, not because it fit. `maxReplicas` for `carts`, `orders`, `queue-master` and `shipping` is now **2**
+(§18 has the measurement that justifies it); the same steady state after the cap measures **4409 MB used /
+5362 MB available**, load ~0.8.
 
 **How to stop and start now.**
 

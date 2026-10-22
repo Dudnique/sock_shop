@@ -369,7 +369,7 @@ the Service carries `prometheus.io/scrape: "true"` so the existing
 
 ```powershell
 cd aiops\triage-bot
-python -m unittest discover -s tests -t . -v      # 120 tests, seconds, no network
+python -m unittest discover -s tests -t . -v      # 136 tests, seconds, no network
 ```
 
 | Test file | What it pins |

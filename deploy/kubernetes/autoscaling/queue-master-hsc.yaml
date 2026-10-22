@@ -12,7 +12,11 @@ spec:
     kind: Deployment
     name: queue-master
   minReplicas: 1
-  maxReplicas: 5
+  # 2, not the 1..5 the light services use: `queue-master` is a JVM service and
+  # each pod settles at ~320 MiB RSS. Five replicas here and on the other three
+  # Java services (carts, orders, shipping) is 20 JVMs ~6.4 GB on a 9.7 GB
+  # Docker VM - measured, see "Why these numbers" in README.md.
+  maxReplicas: 2
   metrics:
     - type: Resource
       resource:

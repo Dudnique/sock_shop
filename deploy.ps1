@@ -4,6 +4,9 @@
 # Thin ORCHESTRATOR. It creates no infrastructure itself:
 #   1. Terraform provisions the k3d cluster  (single source of truth for infra).
 #   2. kubectl deploys the application        (manifests).
+#      With -Helm the same step installs deploy\kubernetes\helm-chart instead; the
+#      rest of the stand is unchanged, because the chart labels its pods exactly
+#      like manifests\ does and the policies/autoscalers select on those labels.
 #   3. kubectl deploys the logging stack      (manifests-logging: Loki + Promtail).
 #   4. kubectl deploys the tracing stack      (manifests-jaeger).
 #   5. kubectl deploys the monitoring stack   (manifests-monitoring).
@@ -37,6 +40,7 @@
 # Usage:   .\deploy.ps1               # bring the stand up
 #          .\deploy.ps1 -WithLoadtest # ...and start the load generator
 #          .\deploy.ps1 -WithAIOps    # ...and deploy the AIOps triage bot
+#          .\deploy.ps1 -Helm         # ...and install the application from the Helm chart
 #          .\deploy.ps1 -Down         # tear it down
 # ---------------------------------------------------------------------------
 [CmdletBinding()]
@@ -53,7 +57,18 @@ param(
     # unchanged for anyone who only wants the application stack.
     # A DEEPSEEK_API_KEY in the environment or in deploy\secrets.local.ps1 is
     # used if present; without it the bot comes up on the rules-only path.
-    [switch]$WithAIOps
+    [switch]$WithAIOps,
+    # Optional: install the application from deploy\kubernetes\helm-chart instead
+    # of `kubectl apply -f manifests\`. Everything else stays on the raw
+    # manifests: the chart covers the app (8 services, 6 datastores, RabbitMQ,
+    # ingress), so network policies, autoscalers, monitoring, alerting and the bot
+    # are applied exactly as before - they select pods by the same `name: <svc>`
+    # label the chart uses.
+    # Trade-offs, both deliberate: manifests\ remains the source of truth (the
+    # chart is a second copy of the same objects, so change both), and the chart
+    # can only be installed into a cluster where those objects are not already
+    # owned by an earlier `kubectl apply` (helm refuses to adopt them).
+    [switch]$Helm
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,7 +77,7 @@ $ErrorActionPreference = "Stop"
 # the default here, in the script body (where it is always available).
 if (-not $TfDir) { $TfDir = Join-Path $PSScriptRoot "terraform\k3d" }
 
-foreach ($tool in @("terraform", "docker", "kubectl")) {
+foreach ($tool in @("terraform", "docker", "kubectl") + $(if ($Helm) { @("helm") } else { @() })) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "Tool '$tool' not found in PATH. Install it and retry."
     }
@@ -269,9 +284,24 @@ if ($k3dContainers.Count -gt 0) {
 }
 
 # --- 2. Application ---------------------------------------------------------
-Write-Host "==> 2/8 Application (sock-shop)" -ForegroundColor Cyan
-kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests")
-kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
+# Two interchangeable ways to create the same application objects. -Helm switches
+# only this step, so network policies, autoscalers, logging, tracing, monitoring,
+# alerting and the bot below are applied from the raw manifests either way.
+if ($Helm) {
+    Write-Host "==> 2/8 Application (sock-shop, Helm chart)" -ForegroundColor Cyan
+    $chart = Join-Path $PSScriptRoot "deploy\kubernetes\helm-chart"
+    # --wait because the rest of the script assumes a working application, and the
+    # timeout is generous because the chart keeps the upstream probe timings
+    # (readiness of carts and shipping starts at 360 s). --atomic rolls the
+    # release back instead of leaving half an application behind on failure.
+    helm upgrade --install sock-shop $chart --namespace sock-shop --create-namespace `
+        --atomic --wait --timeout 10m
+    if ($LASTEXITCODE -ne 0) { throw "helm upgrade --install sock-shop failed (exit $LASTEXITCODE)" }
+} else {
+    Write-Host "==> 2/8 Application (sock-shop)" -ForegroundColor Cyan
+    kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests")
+    kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
+}
 
 # --- 3. Network policies ----------------------------------------------------
 # Before the monitoring stack on purpose: the policies open the scrape path for

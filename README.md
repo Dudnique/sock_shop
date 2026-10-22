@@ -15,12 +15,66 @@ and pulled automatically from Docker Hub, so they are not vendored into the repo
 
 ---
 
+## Scope and limitations
+
+This is a **personal lab, not a production system**. Saying that up front is part of the
+point: the interesting work here is the *shape* of the platform, not the traffic it serves.
+
+| What this is | What this is not |
+|---|---|
+| A reproducible k3s/k3d cluster defined in Terraform, brought up by one command (`.\deploy.ps1`) | A cloud cluster: no cloud account, no managed control plane, no load balancer |
+| 14 workloads (8 services + 5 databases + RabbitMQ), Ingress, 8 HPA, 17 NetworkPolicy | Multi-tenant: one operator, one namespace per layer, no dev/stage/prod separation |
+| All three observability pillars wired end to end: 11 alert rules in 4 groups, 7 dashboards, 3 data sources | Production durability: Prometheus TSDB is on `emptyDir`, Jaeger is in-memory, Loki keeps a few days on a `hostPath` |
+| Alerts that carry `namespace/deployment/pod` and a runbook command, delivered to Telegram **and** Slack | An on-call rota, escalation policy, error budgets or SLO reporting |
+| An AIOps triage bot that validates LLM output against a whitelist and acts only through a scoped ServiceAccount | Anything touching real user data: no PII, no payment integration, no real customers |
+| 136 automated tests for the bot, plus CI gates (`kubeconform`, `yamllint`, `helm lint`, `terraform validate`, `promtool`) | A secret store: `Secret` objects plus a git-ignored local file, no Vault, no sealed-secrets |
+| Incidents found and fixed on the way, written up with the reasoning ([FIXES.md](./FIXES.md)) | Proof that you can carry a pager. A lab cannot prove that, and it should not pretend to |
+
+Everything above is deliberate scoping, not a gap I am unaware of.
+
+## What I would do differently in production
+
+Each item below is a decision that is *wrong* here only because this is a single-Docker-host
+lab — in production the same stand would look like this:
+
+1. **Managed control plane and real nodes** (EKS/GKE/AKS, or Hetzner + k3s): no `k3d`
+   containers, node pools, one node per failure domain, a real LoadBalancer with TLS.
+2. **etcd backups and a rehearsed upgrade.** Today a cluster loss costs a re-deploy; in
+   production it needs scheduled snapshots, a restore tested on a timer, and an upgrade
+   plan with a pinned rollback version.
+3. **External secrets with rotation.** Keeping them out of git is the floor, not the
+   ceiling: Vault / External Secrets / SOPS, per-namespace scope, rotation on a schedule.
+4. **Persistence with a backup story.** `emptyDir` for Prometheus is a demo choice;
+   production needs a PVC, a retention policy and a restore procedure for the TSDB —
+   losing history after an incident is how you lose the incident.
+5. **Identity instead of static RBAC.** OIDC/SSO groups mapped to roles, no long-lived
+   kubeconfigs, one ServiceAccount per workload, and audit logs shipped where the
+   cluster admin cannot delete them.
+6. **GitOps instead of a deploy script.** `deploy.ps1` is deliberately a *learning*
+   artefact: it shows every step out loud. Production wants Argo CD/Flux, image digests
+   instead of tags, and a rollback that is a `git revert`.
+7. **SLOs, error budgets and on-call.** The rules exist, but a page is a process:
+   severity levels, escalation, runbooks executed at least once, blameless postmortems.
+8. **Cost and capacity as a signal.** Requests and limits are set, but nothing reports
+   what the stand costs or how much headroom is left; production keeps that on a dashboard.
+
+What is *not* on this list: the alert rules, the network policies, the CI gates and the
+triage-bot guardrails are already the shape I would ship. The difference is scale and
+process, not design.
+
+---
+
 ## Requirements
 
 - Windows (or Linux/macOS) with:
   - [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.5
   - [Docker](https://docs.docker.com/get-docker/) (running)
   - [kubectl](https://kubernetes.io/docs/tasks/tools/)
+
+The Docker Desktop VM needs **8 GB minimum, 10 GB comfortable**: WSL2 defaults to half of the host
+RAM, so on a 16 GB machine the ceiling is 7.6 GB, and that is exactly where this stand stops working -
+it grows to ~7.4 GB after a few days (FIXES.md, section 22). `memory=10GB` in `%UserProfile%\.wslconfig`
+raises it to 9.7 GB; it is a host-level setting, so the scripts do not touch it.
 
 The [k3d](https://k3d.io/) CLI is convenient for inspecting the cluster, but it is
 not required: the Terraform provider talks to Docker directly.
@@ -86,6 +140,14 @@ from the very same `deploy\secrets.local.ps1`):
 
 ```powershell
 .\deploy.ps1 -WithAIOps
+```
+
+Install the application from the Helm chart instead of the raw manifests - the rest of the
+stand (policies, autoscalers, monitoring, alerting, bot) is unchanged, because the chart
+labels its pods exactly like `manifests/` does (see "The Helm path" below):
+
+```powershell
+.\deploy.ps1 -Helm
 ```
 
 
@@ -196,6 +258,37 @@ kubectl -n monitoring port-forward svc/triage-bot 8080:8080
 The application can also be applied from a single file:
 `kubectl apply -f deploy/kubernetes/complete-demo.yaml`.
 
+## The Helm path (application only)
+
+The same application objects are packaged as a chart, and both deploy paths are
+checked in CI (`helm lint --strict`, then `helm template | kubeconform` on the
+rendered output):
+
+```powershell
+.\deploy.ps1 -Helm     # the application comes from the chart; everything else is unchanged
+# or by hand, on a cluster Terraform already created:
+helm upgrade --install sock-shop deploy\kubernetes\helm-chart --namespace sock-shop --create-namespace
+```
+
+What the chart covers is the application: the 8 services, the 6 datastores,
+RabbitMQ and the ingress. Network policies, autoscalers, logging, tracing,
+monitoring, alerting and the triage bot stay on the raw manifests - and they keep
+working, because the chart labels its pods `name: <service>` exactly like
+`manifests/` does, which is what the NetworkPolicy and HPA selectors match on.
+
+Three limits are worth knowing before choosing this path:
+
+- `manifests/` stays the source of truth. The chart is the same objects written a
+  second time, so a change lands in both or it is a bug. CI catches rendering and
+  schema errors on both sides, not semantic drift between them.
+- Install into a **fresh** cluster. `helm` refuses to adopt objects that an earlier
+  `kubectl apply` created (`invalid ownership metadata`), so switching paths on a
+  live stand means `.\deploy.ps1 -Down` first.
+- The chart keeps the upstream probe timings (readiness of `carts` and `shipping`
+  starts at 360 s), so `--wait` needs about six minutes. The raw manifests probe
+  the four services that expose `/health` and rely on `availableReplicas` for the
+  rest, which is why the manifest path reports Ready sooner.
+
 ## Accessing the application and tools
 
 Everything except Grafana's ingress is reachable from the host **without**
@@ -301,10 +394,19 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 │       ├── manifests-aiops/                # AIOps triage bot (M1): ConfigMap, Deployment, Service, NetworkPolicy
 │       ├── autoscaling/                    # HPA v2 for the stateless services (+ legacy/)
 │       ├── complete-demo.yaml              # application in one file
-│       └── helm-chart/                     # alternative: Helm chart
-└── terraform/
-    └── k3d/                                # declarative definition of the cluster
+│       └── helm-chart/                     # alternative: Helm chart (application only)
+├── terraform/
+│   └── k3d/                                # declarative definition of the cluster
+└── legacy/                                 # archived upstream material, never deployed
+    └── README.md                           # what is in there and why it is not used
 ```
+
+Two folders in that tree are deliberately outside the deployment path: `legacy/`
+(archived upstream material - the old compose files, the `kind`-based CI, the AWS
+Terraform, the helper images) and `deploy\kubernetes\helm-chart` (an alternative way
+to install the application, described above). `legacy\README.md` lists what each
+folder was and why it is not used; nothing in it is ever applied, because
+`kubectl apply -f <dir>` does not recurse.
 
 ## Stop / remove
 
@@ -322,12 +424,16 @@ Or, to only pause the stand:
 
 Do not `docker stop k3d-sock-shop-*` and expect `docker start` to bring the stand back. k3d creates
 those containers with the `unless-stopped` policy, so a Docker restart starts all four at once
-(measured: load average 355 and 68 MB free on a 7.5 GB VM), and a container that lost its network
-endpoint to a VM restart makes k3s exit with code 0 - the node looks like it started and vanished, the
-load balancer cannot resolve it, and `kubectl` times out while the server is fine. `stand.ps1` handles
-both: it sets the policy to `no`, starts the server first, the agents one at a time and the load
-balancer last, and if a node still refuses to come back it rebuilds the cluster with `deploy.ps1`
-(FIXES.md, section 22).
+(measured: load average 355 and 68 MB free on a 7.5 GB VM - the WSL2 default ceiling), and a container
+that lost its network endpoint to a VM restart makes k3s exit with code 0 - the node looks like it
+started and vanished, the load balancer cannot resolve it, and `kubectl` times out while the server is
+fine. `stand.ps1` handles all of it: it sets the policy to `no`, starts the server first, the agents one
+at a time and the load balancer last, reconnects a lost endpoint, deletes a `Node` object whose recorded
+address no longer matches the container and retries the start (the case that used to end in a rebuild),
+and only then falls back to `deploy.ps1` (FIXES.md, section 22).
+
+Verified on this stand: `-Stop` then `-Start -NoRebuild` → endpoints reconnected, three nodes `Ready`,
+30/30 pods `Running`, `http://localhost:8080/` answered 200 - no rebuild.
 
 `k3d cluster delete sock-shop` still exists, but `.\deploy.ps1 -Down` is the supported way to remove the
 cluster, because terraform keeps the state.

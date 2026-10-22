@@ -217,7 +217,7 @@ jobs:
   #    - `terraform validate` then checks syntax, types and provider schema
   #      WITHOUT talking to any real API, so it is safe and fast in CI.
   #    Scoped with working-directory so the legacy AWS config under
-  #    deploy/kubernetes/terraform (kept only as a reference) is not checked.
+  #    legacy/aws-ec2-cluster (kept only as a reference) is not checked.
   # ---------------------------------------------------------------------------
   terraform-validate:
     runs-on: ubuntu-latest

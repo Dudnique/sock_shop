@@ -155,6 +155,8 @@ deploy/secrets.local.ps1
 internal-docs/interview.md
 internal-docs/interview*.local.md
 internal-docs/plan*.local.md
+internal-docs/architecture.md
+internal-docs/README.md
 
 # Editor / backup leftovers
 *.bak

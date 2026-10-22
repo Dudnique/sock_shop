@@ -14,8 +14,8 @@ awk '{print}' manifests/* > complete-demo.yaml
 ```
 
 `awk` is exactly what the CI sync check uses as well. The old Docker + `make` wrapper for
-this used to live in this directory; it is archived under `ci-legacy/` (see
-`ci-legacy/README.md`).
+this used to live in this directory; it is archived under `legacy/ci-legacy/` (see
+`legacy/ci-legacy/README.md`).
 
 ## Monitoring
 

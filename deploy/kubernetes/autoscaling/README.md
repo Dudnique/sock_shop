@@ -23,14 +23,19 @@ applied:
 
 | File | Target | Replicas |
 |---|---|---|
-| `carts-hsc.yaml` | `carts` | 1..5 |
+| `carts-hsc.yaml` | `carts` | 1..2 |
 | `catalogue-hsc.yaml` | `catalogue` | 1..5 |
 | `front-end-hsc.yaml` | `front-end` | 1..5 |
-| `orders-hsc.yaml` | `orders` | 1..5 |
+| `orders-hsc.yaml` | `orders` | 1..2 |
 | `payment-hsc.yaml` | `payment` | 1..5 |
-| `queue-master-hsc.yaml` | `queue-master` | 1..5 |
-| `shipping-hsc.yaml` | `shipping` | 1..5 |
+| `queue-master-hsc.yaml` | `queue-master` | 1..2 |
+| `shipping-hsc.yaml` | `shipping` | 1..2 |
 | `user-hsc.yaml` | `user` | 1..5 |
+
+The four services capped at 2 are exactly the four **JVM** ones (`carts`,
+`orders`, `queue-master`, `shipping`); the four that keep 1..5 are Go/Node and
+cost 50-100 MiB per pod. See "Why these numbers" for the measurement behind the
+asymmetry.
 
 Databases (`*-db`, `rabbitmq`, `session-db`) are deliberately NOT autoscaled:
 scaling a stateful store on this stand would mean multiple writers over an
@@ -43,17 +48,36 @@ scaling a stateful store on this stand would mean multiple writers over an
   target that means the same thing across pods and nodes.
 - **`minReplicas: 1`** - the stand runs on a laptop; a floor of 2 doubles the
   footprint for a demo nobody is watching.
-- **`maxReplicas: 5`** - a node-budget decision, not a round number: eight
-  services x 10 replicas would be 80 pods on three k3d nodes, which measures the
-  nodes rather than the application.
+- **`maxReplicas: 5` for the light services, `2` for the four JVM ones.** The
+  history first, because the number did not come from a measurement: upstream
+  shipped `10` on all eight, and the first rewrite of these files cut it to 5 by
+  counting **pods** - eight services x 10 replicas is 80 pods on three k3d nodes,
+  which measures the nodes rather than the application. Pods are the wrong unit:
+  40 pods of 50 MiB is nothing, 20 pods of 320 MiB is 6.4 GB. The budget that
+  decides this is counted in bytes - `carts`, `orders`, `queue-master` and
+  `shipping` settle at **~320 MiB RSS per pod** (`kubectl top
+  pods`), so five replicas of each is 20 JVMs ~**6.4 GB** on a 9.7 GB Docker VM -
+  before Prometheus/Alertmanager/Grafana/Loki/Jaeger (~1 GB) and k3s itself
+  (~0.6 GB). Observed after a stand restart: all four went to 5, the VM reached
+  **8989 MB used / 802 MB available** with a load average of 16-22, and stayed
+  there for ~8 minutes until the 300 s downscale window walked it back;
+  `describe hpa` also logged `FailedGetResourceMetric` throughout that window - a
+  VM too busy to answer the metrics API cannot scale itself back down. With the
+  cap at 2 the same restart peaks at 8 Java pods ~2.6 GB and never approaches the
+  ceiling. The demo is unaffected: 1 -> 2 is a real rescale, in `kubectl get hpa`
+  and in the HPA events.
 - **`behavior`**: up 2 pods / 30 s, but only after a **120 s** scale-up
   stabilization window; down 1 pod / 60 s behind a 300 s window. Without it you
   get the classic flap - and on a cold start the opposite: every JVM warms up at
-  once, `carts` spends a minute at 183% of its 100m request, and the HPA takes it
-  to five replicas. Measured on this stand: with a 30 s window a rebuild left
-  `carts` and `shipping` at 5 pods each and the 7.5 GB Docker VM at **64 MB free**
-  with a load average of 12 - `kubectl` times out and `docker ps` stalls, which
-  looks like a dead cluster. With 120 s both stay at one replica.
+  once, `carts` spends a minute at 183% of its 100m request. Measured on this
+  stand: with a 30 s window a rebuild left `carts` and `shipping` at 5 pods each
+  and the 7.5 GB Docker VM at **64 MB free** with a load average of 12 -
+  `kubectl` times out and `docker ps` stalls, which looks like a dead cluster.
+  The 120 s window covers the *deploy* case, where pods are created a few at a
+  time while images import. It does **not** cover a stand restart, where all 30
+  pods start at once and the four JVMs stay above target for longer than two
+  minutes - that is the case the `maxReplicas: 2` cap exists for. The window alone
+  was not enough, and the restart measurement above is the proof.
 
 ## Prerequisites (both checked by `deploy.ps1`)
 

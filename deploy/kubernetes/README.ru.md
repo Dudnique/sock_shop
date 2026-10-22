@@ -17,8 +17,8 @@ awk '{print}' manifests/* > complete-demo.yaml
 ```
 
 Это ровно та команда, которой пользуется и CI-проверка синхронности. Старая обёртка
-Docker + `make` для этого жила в этом каталоге; она отправлена в `ci-legacy/`
-(см. `ci-legacy/README.md`).
+Docker + `make` для этого жила в этом каталоге; она отправлена в `legacy/ci-legacy/`
+(см. `legacy/ci-legacy/README.md`).
 
 ## Мониторинг
 

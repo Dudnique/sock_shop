@@ -268,12 +268,58 @@ function Start-Container {
 }
 
 # A node container that lost its endpoint to a Docker/WSL restart does not always
-# come back: k3s exits with code 0 before the interface it needs exists, and a
-# rebuilt endpoint does not change that (measured; FIXES.md, section 22). The
-# cluster is infrastructure as code, so the dependable answer is to recreate it -
-# the path section 17 already recorded as the one that works. About six minutes,
-# and the bot's journal lives on a PVC that goes with the old cluster, so a
-# rebuilt stand starts with an empty journal.
+# come back: k3s exits with code 0 before the interface it needs exists. Measured
+# cause, and it is not the endpoint: the Node object in etcd still carries the
+# address the container had in an earlier run. k3s starts the network-policy
+# controller with that recorded address, does not find it on any interface
+# ("failed to find interface with specified node ip") and shuts the agent down -
+# with exit code 0, so the container looks like it started and vanished.
+#
+# Deleting the Node object makes the agent register from scratch, and then it
+# adopts whatever address Docker gave it (measured on this stand: agent-1 came
+# back on 172.19.0.4 while the stale record said 172.19.0.3, and stayed up).
+# Without the stale record it would have been the sixth rebuild of the cluster,
+# and the pods of that node are recreated by their controllers anyway, because a
+# deleted node takes its pods with it.
+function Reset-NodeRegistration {
+    param([string]$Name)
+    # --ignore-not-found, because on a healthy start there is nothing to delete -
+    # this also has to be harmless on the very first boot of the cluster.
+    $result = Invoke-Docker -Line "exec $server kubectl delete node $Name --ignore-not-found --request-timeout=15s" -Seconds 30
+    if ($result.Code -ne 0) {
+        Write-Note "$Name : could not drop its stale Node object: $($result.Text)"
+        return $false
+    }
+    Write-Note "$Name had a stale Node object (its old address no longer exists) - dropped it so the agent can register again"
+    return $true
+}
+
+# kubeconform-style strictness does not apply here, but the ordering does: the
+# node object can only be dropped while the server answers, and the agent can only
+# register while the server answers - both are already true at this point.
+function Start-NodeWithRetry {
+    param([string]$Name)
+    $result = Start-Container $Name
+    if ($result.Code -ne 0) { return $result }
+    Start-Sleep -Seconds 10
+    if (Test-Running $Name) { return $result }
+
+    $log = Invoke-Docker -Line "logs --tail 20 $Name" -Seconds 20
+    if ($log.Text -notmatch 'failed to find interface with specified node ip') { return $result }
+
+    Write-Note "$Name exited on the stale node address - dropping the Node object and starting it again"
+    if (-not (Reset-NodeRegistration $Name)) { return $result }
+    $result = Start-Container $Name
+    if ($result.Code -ne 0) { return $result }
+    Start-Sleep -Seconds 10
+    return $result
+}
+
+# A node container that still refuses to come back after the node object was
+# dropped is the case where recreating the cluster is the dependable answer - the
+# path section 17 already recorded as the one that works. About six minutes, and
+# the bot's journal lives on a PVC that goes with the old cluster, so a rebuilt
+# stand starts with an empty journal.
 function Invoke-Rebuild {
     Write-Step "Rebuilding the cluster"
     Write-Note "A node container did not survive the stop, and k3s will not run without the"
@@ -412,14 +458,16 @@ function Invoke-Start {
             Write-Note "  .\deploy\cleanup-stand.ps1      then re-run .\deploy\stand.ps1 -Start"
             exit 4
         }
-        $result = Start-Container $agent
+        $result = Start-NodeWithRetry $agent
         if ($result.Code -ne 0) { Write-Bad "${agent}: $($result.Text)"; exit 3 }
         # The node object can still say Ready for a moment after the agent died,
         # so ask the container itself before trusting the gate below.
-        Start-Sleep -Seconds 10
         if (-not (Test-Running $agent)) {
             Write-Bad "$agent exited seconds after starting (exit 0 = the k3s node-address failure)"
-            Write-Note "Its k3s log says 'failed to find interface with specified node ip'."
+            Write-Note "Its k3s log says 'failed to find interface with specified node ip', which means the"
+            Write-Note "Node object still carries the address the container had before it was stopped."
+            Write-Note "This script drops that object and starts the agent again; if it got here, that did"
+            Write-Note "not help either."
             if (-not $NoRebuild) { Invoke-Rebuild }
             Write-Note "Recreate the cluster instead: .\deploy.ps1 -Down, then .\deploy.ps1 -WithAIOps"
             exit 5
