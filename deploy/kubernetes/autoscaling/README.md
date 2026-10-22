@@ -64,8 +64,11 @@ scaling a stateful store on this stand would mean multiple writers over an
   `describe hpa` also logged `FailedGetResourceMetric` throughout that window - a
   VM too busy to answer the metrics API cannot scale itself back down. With the
   cap at 2 the same restart peaks at 8 Java pods ~2.6 GB and never approaches the
-  ceiling. The demo is unaffected: 1 -> 2 is a real rescale, in `kubectl get hpa`
-  and in the HPA events.
+  ceiling: measured on the same `-Stop`/`-Start` with the cap in place, the VM
+  peaked at **5868 MB of 7942 used, 1894 MB available**, load back to 0.28 in four
+  minutes. That measurement is also what let the VM ceiling come back down from
+  10 GB to 8 GB (FIXES.md, section 22). The demo is unaffected: 1 -> 2 is a real
+  rescale, in `kubectl get hpa` and in the HPA events.
 - **`behavior`**: up 2 pods / 30 s, but only after a **120 s** scale-up
   stabilization window; down 1 pod / 60 s behind a 300 s window. Without it you
   get the classic flap - and on a cold start the opposite: every JVM warms up at

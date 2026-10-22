@@ -1242,7 +1242,7 @@ node dies again, this time with a healthy endpoint.
 | Why the API is asked inside the server | Before the balancer runs the kubeconfig is useless (it publishes the port), while the server container carries `kubectl` and its own credentials |
 | Endpoint repair: `network disconnect -f` + `network connect` | An empty endpoint is the only reason for the `exit(0)`; the address is deliberately **not** pinned: k3s accepts whatever address the interface has, while pinning the old one collides with whichever container took it in the meantime |
 | Start retried once on `Address already in use` | `docker start` restores the endpoint recorded in the container config, and that record can name an address another node owns by now; rebuilding the endpoint clears it |
-| `%USERPROFILE%\.wslconfig`: `memory=10GB`, `swap=2GB` | Removing the real ceiling instead of shrinking the stand: `docker info` now reports `MemTotal 10429034496` (9.7 GB), and a fresh stand uses ~4.6 GB of it. Small swap on purpose - enough for a spike, not enough to thrash |
+| `%USERPROFILE%\.wslconfig`: `memory=8GB`, `swap=2GB`, `autoMemoryReclaim=gradual` | Removing the real ceiling instead of shrinking the stand: `docker info` reports `MemTotal 8327696384` (7.76 GB) and a fresh stand uses ~4.6 GB of it. Small swap on purpose - enough for a spike, not enough to thrash. `gradual` because WSL2 otherwise keeps what it took: measured with `memory=10GB`, `vmmemWSL` held a 9.66 GB commit while only 2.63 GB of it was resident, Windows had 0.5 GB free and 2.56 GB parked in Memory Compression |
 | `Reset-NodeRegistration` in `stand.ps1` | Deletes the stale `Node` object (`kubectl delete node`, asked **inside** the server) and retries the start, instead of declaring the cluster unrevivable. Only the `Node` object goes: the datastores keep their emptyDir contents inside their containers, and the pods reschedule |
 | `Start-NodeWithRetry` | Starts one agent, waits for it to stay running and reach `Ready`; on the stale-address failure it resets the registration exactly once and tries again - the case that used to end in a rebuild |
 | `-NoRebuild` and an automatic rebuild | If a node still refuses to come back, the honest path is to recreate the cluster (`deploy.ps1 -Down`, then `-WithAIOps`); `-Start` does that by itself, because "start it and have it work" matters more than "start it cheaply" |
@@ -1259,6 +1259,19 @@ path did not have to fire; it is the safety net for the run where they do not ma
 raised, not because it fit. `maxReplicas` for `carts`, `orders`, `queue-master` and `shipping` is now **2**
 (§18 has the measurement that justifies it); the same steady state after the cap measures **4409 MB used /
 5362 MB available**, load ~0.8.
+
+**So the ceiling went back down to 8 GB.** With the cap in place, 10 GB was headroom nobody used - 4.4 GB
+steady, 5.9 GB at the worst restart - so `.wslconfig` became `memory=8GB`, `swap=2GB`,
+`autoMemoryReclaim=gradual` and `docker info` reports `MemTotal 8327696384` (7.76 GB). The `gradual` line
+is not decoration: WSL2 does not hand memory back on its own, and on this host that showed up as
+`vmmemWSL` holding a **9.66 GB commit while only 2.63 GB of it was resident**, Windows down to **0.5 GB
+free** and **2.56 GB** already parked in Memory Compression. Verified with the same restart:
+`wsl --shutdown`, then `stand.ps1 -Start` - endpoints reconnected, three nodes `Ready` in ~40 s, 42 pods
+`Running`, `http://localhost:8080/` answered **200** with 8688 bytes. The cold start with the cap peaked at
+**5868 MB of 7942 used, 1894 MB available**, load back to 0.28 within four minutes, swap down to 6 MB (the
+old run left 692 MB in swap). The 8989 MB peak from the paragraph above would not fit in 8 GB: the cap,
+not the ceiling, is what makes this size enough - and anything below ~8 GB is the 7.5 GB default that
+wedged in the first place.
 
 **How to stop and start now.**
 

@@ -66,8 +66,11 @@ load average 12 — `kubectl` уходит в таймаут, `docker ps` вис
 RSS** (`kubectl top pods`), то есть 5×4 = 20 JVM ≈ **6,4 ГБ** до
 Prometheus/Alertmanager/Grafana/Loki/Jaeger (~1 ГБ) и самого k3s (~0,6 ГБ). С
 потолком 2 тот же перезапуск даёт 8 Java-подов ~2,6 ГБ и до потолка ВМ не
-доходит. Демо не страдает: 1 → 2 — это настоящий rescale, видно и в
-`kubectl get hpa`, и в событиях HPA.
+доходит: замер на том же `-Stop`/`-Start`, уже с потолком — **5868 МБ занято из
+7942, 1894 МБ доступно**, load вернулся к 0,28 за четыре минуты. Этот же замер
+позволил вернуть потолок ВМ с 10 ГБ на 8 ГБ (FIXES.ru.md, раздел 22). Демо не
+страдает: 1 → 2 — это настоящий rescale, видно и в `kubectl get hpa`, и в событиях
+HPA.
 
 `kubectl -n sock-shop describe hpa front-end` говорит то же словами:
 `New size: 3; reason: cpu resource utilization (percentage of request) above target`.

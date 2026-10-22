@@ -71,10 +71,12 @@ process, not design.
   - [Docker](https://docs.docker.com/get-docker/) (running)
   - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 
-The Docker Desktop VM needs **8 GB minimum, 10 GB comfortable**: WSL2 defaults to half of the host
-RAM, so on a 16 GB machine the ceiling is 7.6 GB, and that is exactly where this stand stops working -
-it grows to ~7.4 GB after a few days (FIXES.md, section 22). `memory=10GB` in `%UserProfile%\.wslconfig`
-raises it to 9.7 GB; it is a host-level setting, so the scripts do not touch it.
+The Docker Desktop VM needs **8 GB**: WSL2 defaults to half of the host RAM, so on a 16 GB machine
+the ceiling is 7.6 GB, and that is exactly where this stand stops working - it grows to ~7.4 GB
+after a few days (FIXES.md, section 22). `memory=8GB` in `%UserProfile%\.wslconfig` gives it 7.76 GB,
+`swap=2GB` absorbs a spike, and `autoMemoryReclaim=gradual` hands the unused part back to Windows
+instead of holding it until the next `wsl --shutdown`. It is a host-level setting, so the scripts do
+not touch it.
 
 The [k3d](https://k3d.io/) CLI is convenient for inspecting the cluster, but it is
 not required: the Terraform provider talks to Docker directly.
