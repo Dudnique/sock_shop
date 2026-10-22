@@ -20,6 +20,9 @@ Actions only runs files that live directly in `.github/workflows/`.
 
 - **`build-test-images`** — built and pushed the `openapi` / `healthcheck`
   images to Docker Hub (needs the `DOCKER_USER` / `DOCKER_PASS` secrets).
+  → the one job that was carried over: it still exists in
+  `.github/workflows/main.yaml` and runs on a `v*` tag, with the build context
+  following the sources into `legacy/openapi` and `legacy/healthcheck`.
 
 ## Archived tooling (`Makefile`, `manifests-Makefile`, `manifests-Dockerfile`)
 

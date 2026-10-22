@@ -14,7 +14,7 @@ they were about - not so that it can be run.
 | `staging/` | Upstream Terraform for a staging cluster on AWS from a bastion host. | Same: cloud staging was never part of this repository's story; `terraform/k3d` is the supported cluster. |
 | `aws-ec2-cluster/` | Upstream Terraform for a Kubernetes cluster on AWS EC2 (master + node + ELB, previously `deploy/kubernetes/terraform`). | The repo's cluster is local (k3d). Kept because CI once referred to it; the `terraform validate` job is scoped to `terraform/k3d` only. |
 | `graphs/` | `grafanalib` generators for the Grafana dashboards. | The dashboards are provisioned from `deploy/kubernetes/manifests-monitoring` (ConfigMaps), so a generator would be a second source of truth. |
-| `openapi/`, `healthcheck/` | Helper images (a Swagger UI for the API spec, a Ruby health-checker) built by `ci-legacy/main.yaml`. | No manifest in `deploy/kubernetes` references either image, so both would be built and never deployed. |
+| `openapi/`, `healthcheck/` | Helper images (a Swagger UI for the API spec, a Ruby health-checker). Archived here, but the surviving `build-test-images` job in `.github/workflows/main.yaml` still builds and publishes both from these paths on a `v*` tag. | No manifest in `deploy/kubernetes` references either image, so both would be built and never deployed. |
 
 Rules of thumb for this folder:
 

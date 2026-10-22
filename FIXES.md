@@ -104,10 +104,12 @@ Two small housekeeping changes closed this section. With `legacy/ci-legacy/` set
 file is the only thing CI runs, so its pins became the ones that matter: retiring the node20
 runner had to be done by hand (commit `05cd3bb`), and `.github/dependabot.yml` now opens a
 weekly PR whenever an action, a Terraform provider or one of the two helper images
-(`openapi/`, `healthcheck/`) has a newer version. The scope is deliberately narrow and
+(`legacy/openapi/`, `legacy/healthcheck/`) has a newer version. The scope is deliberately narrow and
 **major** updates are excluded on purpose - a new major of an action or a provider changes
 behaviour and is a decision, not a chore. Nothing is merged automatically: every PR runs this
-same workflow.
+same workflow. Pointing those two entries at the archived paths mattered: while they still said
+`/openapi` and `/healthcheck`, every weekly run failed with "couldn't find a Dockerfile" and no PR
+was opened, so the base-image pins froze without a single visible error (commit `cb1f876`).
 
 ---
 
