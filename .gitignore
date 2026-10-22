@@ -160,3 +160,9 @@ internal-docs/README.md
 
 # Editor / backup leftovers
 *.bak
+
+# Helm chart render output. `helm template ... > rendered.yaml` is a build
+# artifact: it is what check-parity.py and kubeconform read, not source.
+# CI writes it inside the job's workspace; a local run must not commit it.
+/rendered.yaml
+
