@@ -1358,9 +1358,45 @@ times slower to react to the same load (§14 is where that arithmetic was measur
 **The limitation worth knowing.** The chart path still has never been installed
 end-to-end: `helm` refuses to adopt objects that an earlier `kubectl apply` created, so
 `.\deploy.ps1 -Helm` needs a fresh cluster, and that run is what would settle the four
-image questions. The checker also compares only replicas, resources and image - probes,
-env and ports are not compared, because the chart deliberately keeps the upstream 360 s
-readiness timings while the manifests do not.
+image questions. The checker also compares only replicas, resources and image - the rest
+of the pod spec is out of scope, and the next subsection lists exactly what that hides.
+
+**What that scope leaves out.** Rendering both sides and diffing `env`,
+`containerPort`, `volumeMounts` and probes (the comparison the gate does *not* make)
+gives this:
+
+| Workload | Field | `manifests/` | chart |
+| -------- | ----- | ------------ | ----- |
+| `carts`, `orders`, `queue-master`, `shipping` | `JAVA_OPTS` | `-Xms64m -Xmx128m -XX:+UseG1GC ... -Dspring.zipkin.enabled=false` | the same **plus** `-XX:PermSize=32m -XX:MaxPermSize=64m`, **without** the zipkin flag |
+| `catalogue`, `payment` | `ZIPKIN` | `http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans` | not set |
+| `shipping` | `ZIPKIN` | `zipkin.jaeger.svc.cluster.local` | not set |
+| `user` | Mongo address | `mongo: user-db:27017` | `MONGO_HOST: user-db:27017` |
+| `payment` | `containerPort` | 80 | 8080 |
+| `rabbitmq` | ports | 15672 **and** 5672 | 5672 |
+| `carts`, `orders`, `queue-master`, `shipping` | `readinessProbe` | none - Ready comes from `availableReplicas` | 360 / 180 / 180 / 360 s |
+
+None of it is cosmetic. `PermSize` was removed in Java 11 and a modern JVM ignores the
+flag with a warning; without `-Dspring.zipkin.enabled=false` the chart's services keep
+looking for a tracing endpoint the chart never sets; `MONGO_HOST` versus `mongo` is two
+different names for the same address, and only one of them is what the manifests
+actually run on. The port one was measured rather than inferred: inside the running
+`payment` pod `cat /proc/net/tcp6` shows a single listening socket on `:0050` (port 80,
+state `0A`) and nothing on `:1F90` (8080), so the chart's Service at `targetPort: 8080`
+would have no backend and the checkout path would break.
+
+Why they are not in the gate yet: each one needs the chart's **templates** edited and
+then a `-Helm` run to prove the pods still come up - and that run needs a fresh cluster
+(`.\deploy.ps1 -Down`, then `-Helm`), because `helm` will not adopt `kubectl apply`'d
+objects. Changing them by inference from `manifests/` alone would replace a documented
+drift with an undocumented guess. The probes are a different case: the README already
+calls them an intentional difference, so a gate that compared them would be permanently
+red, and a gate that is always red is a gate nobody reads.
+
+So the honest claim today is narrower than "the same objects twice": **the chart's
+resource contract matches `manifests/`; its pod behaviour does not.** `-Helm` shows that
+the application can be packaged as a chart, and it renders and validates cleanly - it is
+not a drop-in second deployment path until those seven rows are reconciled on a cluster.
+
 
 
 

@@ -300,7 +300,10 @@ Both paths ask for the same **1.7 GiB** of memory in total. That equality is
 checked, not assumed: the chart used to request `2000Mi` on each of the four JVM
 services - 10 GiB of requests on a stand that has 8 GB - while every CI run stayed
 green, because "the chart renders" and "the chart describes the same pod" are two
-different claims (`FIXES.md` §23).
+different claims (`FIXES.md` §23). That gate covers replicas, resources and image;
+pod behaviour (`env`, ports, probes) still differs between the two, and §23 lists the
+seven rows that have to be reconciled on a cluster before `-Helm` can be called
+equivalent rather than a demonstration that the application packages as a chart.
 
 ## Accessing the application and tools
 
