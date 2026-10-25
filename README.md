@@ -285,9 +285,10 @@ Three limits are worth knowing before choosing this path:
   `kubeconform` - which only prove that each side is valid on its own - CI compares
   the two (`deploy/kubernetes/helm-chart/check-parity.py`: replicas, every
   container's name and ports, and the image, `command`, `args`, `env` and resources
-  for all 14 workloads). Three image differences are allowlisted there, because
-  neither side is obviously right: `mongo` vs `mongo:4.4.0` for the two Mongo
-  datastores and `user-db:0.3.0` vs `0.4.0`.
+  for all 14 workloads; every Service's type, labels, ports and annotations; the
+  Ingress; and which objects each side renders at all). Three image differences are
+  allowlisted there, because neither side is obviously right: `mongo` vs
+  `mongo:4.4.0` for the two Mongo datastores and `user-db:0.3.0` vs `0.4.0`.
 - Install into a **fresh** cluster. `helm` refuses to adopt objects that an earlier
   `kubectl apply` created (`invalid ownership metadata`), so switching paths on a
   live stand means `.\deploy.ps1 -Down` first.

@@ -1339,7 +1339,7 @@ times slower to react to the same load (§14 is where that arithmetic was measur
 | `values.yaml`: `carts`, `orders`, `shipping`, `queue-master`, `user`, `catalogue` and `payment` aligned with `manifests/` | The two paths have to describe the same pod, and the manifests are the numbers measured on this stand |
 | `values.yaml`: the 7 datastores got `resources: {}` | `manifests/` sets nothing on them, and a request is not free - the scheduler admits pods on it |
 | `payment`'s `99m` copied verbatim, with a comment | "The same objects" includes the oddities; a checker that tolerated 99m vs 100m would tolerate the next 2000Mi |
-| New `deploy/kubernetes/helm-chart/check-parity.py` | Compares, workload by workload: `replicas`, **every** container's name and ports, and the first container's `image`, `command`, `args`, `env` and `resources`. Exits 1 on any disagreement |
+| New `deploy/kubernetes/helm-chart/check-parity.py` | Compares, workload by workload: `replicas`, **every** container's name and ports, and the first container's `image`, `command`, `args`, `env` and `resources`; then every `Service` (`type`, labels, ports, annotations), the `Ingress` (class, labels, annotations, rules), and the object inventory - a kind/name rendered by one side only is a failure, except the release `Namespace`. Exits 1 on any disagreement |
 | CI: `Compare the rendered chart with manifests/` in `helm-chart-validate` (`pip install pyyaml`, then the script on the file the previous step already rendered) | Turns "the two paths describe the same pods" into a gate instead of a promise |
 | CI renders with `--namespace sock-shop`, the way `deploy.ps1` installs | The chart interpolates `.Release.Namespace` into the pod spec (catalogue's `-DSN`, user's `-mongo-host`), so rendering in `default` compared a pod that is never deployed |
 | The 3 remaining image differences allowlisted **inside the script, each with its reason** | They are real disagreements that need a `-Helm` run to settle; the checker still fails on any *new* one. `rabbitmq` left the list when the chart was aligned |
@@ -1353,8 +1353,8 @@ times slower to react to the same load (§14 is where that arithmetic was measur
 | `helm lint deploy/kubernetes/helm-chart --strict` | exit 0, `1 chart(s) linted, 0 chart(s) failed` |
 | `helm template sock-shop deploy/kubernetes/helm-chart` | exit 0, 29 resources |
 | `kubeconform -strict -summary` on the rendered file, CI's own image, run locally | `29 resources found ... Valid: 29, Invalid: 0, Errors: 0` |
-| `check-parity.py rendered.yaml deploy/kubernetes/manifests` | exit 0, `agree on 14 workload(s): replicas, containers (name + ports), image, command, args, env and resources (3 allowlisted image difference(s))` |
-| The same script against ten deliberately broken renders (a resource, an image, a replica count, a container name, a deleted sidecar, a port, `command`, `args`, an `env` name, an `env` value) | exit 1 every time, with the two values printed side by side - a checker that cannot fail is a rubber stamp |
+| `check-parity.py rendered.yaml deploy/kubernetes/manifests` | exit 0, `agree on 14 workload(s), 14 Service(s) and 1 Ingress(es) - workloads: replicas, containers (name + ports), image, command, args, env, resources; Services: type, labels, ports, annotations; Ingress: class, labels, annotations, rules (3 allowlisted image difference(s), 1 object(s) only the plain path creates)` |
+| The same script against seventeen deliberately broken renders (a resource, an image, a replica count, a container name, a deleted sidecar, a port, `command`, `args`, an `env` name, an `env` value, a dropped Service annotation, a Service `targetPort`, a deleted Service port, an Ingress label, an Ingress backend port, a deleted Service, an added `ConfigMap`) | exit 1 every time, with the two values printed side by side - a checker that cannot fail is a rubber stamp |
 | Total memory requests, both paths | 1700 MiB each, down from 10036 MiB in the chart |
 
 **The second wave: the pod spec, not the resource contract.** Widening the comparison
@@ -1381,8 +1381,29 @@ a key that does not exist, and `catalogue-dep.yaml` gated `NET_BIND_SERVICE` on
 Re-checked after the change, on this checkout: `helm lint --strict` exit 0,
 `helm template ... --namespace sock-shop` renders 29 resources, `kubeconform -strict`
 reports `Valid: 29, Invalid: 0`, and `check-parity.py` exits 0 with `agree on 14
-workload(s): replicas, containers (name + ports), image, command, args, env and resources
-(3 allowlisted image difference(s))`.
+workload(s), 14 Service(s) and 1 Ingress(es) ... (3 allowlisted image difference(s), 1
+object(s) only the plain path creates)`.
+
+**The third wave: the objects around the pod.** With the pod spec settled, the same
+question asked one level up produced two more differences - in the objects that decide
+whether anything reaches that pod at all:
+
+| Object | Field | `manifests/` | chart, before | What it costs |
+| ------ | ----- | ------------ | ------------- | ------------- |
+| `Service` `carts`, `catalogue`, `front-end`, `orders`, `payment`, `shipping`, `user` | `annotations` | `prometheus.io/scrape: 'true'` | no annotations at all | Prometheus discovers this stack's targets by *Service* annotation (role: endpoints in `manifests-monitoring/04-prometheus-configmap.yaml`). Seven of the eight application Services would have disappeared from `TARGETS` under the chart, with no error anywhere - the same failure as the missing `rabbitmq-exporter`, one level up |
+| `Service` `queue-master` | `annotations` | none, with a comment saying why | `prometheus.io/path: "/prometheus"` | The opposite lie: queue-master serves Spring's JSON on `/metrics` and has no Prometheus endpoint (`/actuator/prometheus` -> 404). The manifests dropped the annotation when it produced a permanently firing `ScrapeTargetDown`; the chart still advertised the path |
+| `Ingress` `front-end` | `labels` | `name: front-end` | `{}` (the template rendered `.Values.ingress.labels`, empty) | Nothing selects on it today, so this one is consistency rather than a bug - but "the same objects" has to mean the same objects, or the gate teaches people to tolerate small differences |
+
+The gate was widened in the same change, so these cannot come back: `check-parity.py` now
+also compares every `Service` (`type`, labels, ports as name/port/targetPort/nodePort,
+annotations), the `Ingress` (`ingressClassName`, labels, annotations and every rule) and
+the object inventory of both sides. The inventory check is what caught the real asymmetry
+while writing it: `manifests/` renders a `Namespace`, the chart renders none - which is
+correct, `deploy.ps1 -Helm` installs with `--create-namespace` - so that single pair is
+allowlisted by name (`ONLY_IN_MANIFESTS_OK`) rather than by kind. Seven fresh mutations
+(a dropped scrape annotation, a `targetPort` of 8080, a deleted `exporter` port, an
+emptied Ingress label, an Ingress backend on 8080, a deleted Service, an added
+`ConfigMap`) each exit 1; the last two prove the inventory half.
 
 One correction to an earlier version of this section: it claimed the `PermSize` flags
 would stop a chart pod from starting. Measured, they do not - OpenJDK 8 warns and

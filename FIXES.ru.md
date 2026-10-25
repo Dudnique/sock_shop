@@ -1269,6 +1269,73 @@ swap упал до 6 МБ (в прошлом прогоне в нём остав
 .\deploy\stand.ps1 -Start        # по порядку; при неживой ноде - авто-пересборка
 ```
 
+---
+
+## 23. Helm-чарт, который просил 10 ГиБ на 8-гигабайтном стенде, и CI-гейт, который этого не видел
+
+**Симптом.** Никакого — и это как раз проблема. Стенд был здоров, `helm lint --strict` зелёный,
+`helm template | kubeconform` зелёный, а значения чарта успели разойтись с `manifests/` до
+состояния, когда два пути деплоя описывают уже не одни и те же поды. Это вылезло бы на первом же
+`.\deploy.ps1 -Helm` — единственном пути, который в этом репозитории ни разу не запускали целиком.
+
+**Измерения.** `helm template` против `manifests/`, workload за workload'ом:
+
+| Workload | `manifests/` (requests) | чарт, было (requests) |
+| -------- | ----------------------- | --------------------- |
+| `carts` | 100m / 200Mi | 300m / **2000Mi** |
+| `orders` | 100m / 300Mi | 200m / **2000Mi** |
+| `shipping` | 100m / 300Mi | 300m / **2000Mi** |
+| `queue-master` | 100m / 300Mi | 300m / **1000Mi** |
+| `user` | 100m / 100Mi (limit 300m / 200Mi) | 100m / **400Mi** (limit 1000Mi) |
+| `catalogue` | 100m / 100Mi, limit 200m | limit **100m** |
+| `payment` | 99m / 100Mi, limit 200m | limit **100m** |
+| `carts-db`, `orders-db` | ничего | 500m / 512Mi |
+| `catalogue-db`, `user-db` | ничего | 100m / 300Mi, limit 300m / 1000Mi |
+| `session-db` | ничего | 250m / 256Mi |
+| `rabbitmq` | ничего | 350m / 256Mi, limits **1 CPU** / 512Mi |
+
+Разошлись 13 workload'ов из 14, а сумма — **10036 MiB памяти в requests у чарта против 1700 MiB в
+`manifests/`** на ВМ с потолком 7942 MiB. Четыре образа тоже уехали: `mongo` против `mongo:4.4.0`
+(дважды), `rabbitmq:3.6.8-management` против `rabbitmq:3.6.8` и `user-db:0.3.0` против `0.4.0`.
+
+**Причина.** Две независимые истории в одном репозитории. Чарт — upstream-чарт Weaveworks, который
+хранили «как отдали»; `manifests/` — то место, куда легло каждое измерение §14, §18 и §22: пробы на
+`availableReplicas`, потолок `maxReplicas: 2`, requests в 200–300Mi, из-за которых 8 ГБ вообще
+хватает. Две истории не встречались, и ничто их не сравнивало: `helm lint` и `kubeconform`
+спрашивают, рендерится и валидируется ли каждая сторона **сама по себе**, и оба ответа были «да».
+README даже описывал эту дыру — «CI ловит ошибки рендера и схемы на обеих сторонах, но не смысловое
+расхождение между ними», — и это честно, но честность не гейт.
+
+`requests == limits` у тех четырёх сервисов означает ещё и Guaranteed QoS с потолком 2 ГиБ на
+каждый, а CPU-requests меняют сам автоскейлинг: HPA считает процент от request, поэтому `300m`
+вместо `100m` делает тот же автоскейлер втрое медленнее на той же нагрузке (§14 — там эта арифметика
+и измерена).
+
+**Что изменено.**
+
+| Что | Почему |
+| --- | ------ |
+| `values.yaml`: `carts`, `orders`, `shipping`, `queue-master`, `user`, `catalogue`, `payment` выровнены по `manifests/` | Два пути обязаны описывать один под, а манифесты — те цифры, что измерены на этом стенде |
+| `values.yaml`: у 7 хранилищ `resources: {}` | В `manifests/` у них ничего нет, а request не бесплатен — планировщик принимает под по нему |
+| `99m` у `payment` скопированы дословно, с комментарием | «Те же объекты» включает и странности; чекер, терпевший 99m против 100m, стерпит и следующие 2000Mi |
+| Новый `deploy/kubernetes/helm-chart/check-parity.py` | Сравнивает по workload'ам: `replicas`, имя и порты **каждого** контейнера, а у первого — `image`, `command`, `args`, `env` и `resources`; затем каждый `Service` (`type`, метки, порты, аннотации), `Ingress` (класс, метки, аннотации, правила) и инвентарь объектов обеих сторон. На любое расхождение — exit 1 |
+| CI: шаг `Compare the rendered chart with manifests/` в `helm-chart-validate` (`pip install pyyaml`, затем скрипт на файле, который уже отрендерил предыдущий шаг) | Превращает «два пути описывают одни поды» из обещания в гейт |
+| CI рендерит с `--namespace sock-shop`, как ставит `deploy.ps1` | Чарт подставляет `.Release.Namespace` в pod spec (`-DSN` у catalogue, `-mongo-host` у user), поэтому рендер в `default` сравнивал под, который нигде не разворачивается |
+| Оставшиеся 3 различия по образам внесены в allowlist **внутри скрипта, каждое с причиной** | Это настоящие расхождения, для решения которых нужен прогон `-Helm`; на любое *новое* чекер по-прежнему падает. `rabbitmq` из списка ушёл, когда чарт выровняли |
+| Сравнивается каждый контейнер, а не `containers[0]` | У RabbitMQ в чарте пропал сайдкар `rabbitmq-exporter`, а скрипт, читающий только первый контейнер, не увидит контейнера, которого нет |
+| `yamllint` убран из списка CI-гейтов в `README.md` | `git grep yamllint` находит его только в двух README — ни один workflow его не запускал. Несуществующий гейт — тот же класс отказа, что и чарт, не описывающий те же поды |
+
+**Проверено на этом чекауте.**
+
+| Проверка | Результат |
+| -------- | --------- |
+| `helm lint deploy/kubernetes/helm-chart --strict` | exit 0, `1 chart(s) linted, 0 chart(s) failed` |
+| `helm template sock-shop deploy/kubernetes/helm-chart` | exit 0, 29 ресурсов |
+| `kubeconform -strict -summary` на отрендеренном файле (образ из CI, локально) | `29 resources found in 1 file ... Valid: 29, Invalid: 0, Errors: 0` |
+| `check-parity.py rendered.yaml deploy/kubernetes/manifests` | exit 0, `agree on 14 workload(s), 14 Service(s) and 1 Ingress(es) ... (3 allowlisted image difference(s), 1 object(s) only the plain path creates)` |
+| Тот же скрипт против семнадцати намеренно испорченных рендеров (ресурс, образ, число реплик, имя контейнера, удалённый сайдкар, порт, `command`, `args`, имя `env`, значение `env`, снятая аннотация Service, `targetPort` у Service, удалённый порт Service, метка Ingress, backend-порт Ingress, удалённый Service, добавленный `ConfigMap`) | каждый раз exit 1, с двумя значениями рядом — чекер, который не умеет падать, это печать |
+| Суммарные memory-requests, оба пути | по 1700 MiB, вместо 10036 MiB у чарта |
+
 **Вторая волна: сам pod spec, а не контракт по ресурсам.** Если расширить сравнение с
 `containers[0]` на все контейнеры, а с `resources` — на `command`, `args` и `env`, находится ещё
 восемь расхождений. Важно не то, что они есть, а то, чем каждое подтверждено: измерением, а не
@@ -1292,8 +1359,28 @@ swap упал до 6 МБ (в прошлом прогоне в нём остав
 
 Перепроверено после правки, на этом чекауте: `helm lint --strict` exit 0, `helm template ...
 --namespace sock-shop` — 29 ресурсов, `kubeconform -strict` — `Valid: 29, Invalid: 0`,
-`check-parity.py` — exit 0 и `agree on 14 workload(s): replicas, containers (name + ports), image,
-command, args, env and resources (3 allowlisted image difference(s))`.
+`check-parity.py` — exit 0 и `agree on 14 workload(s), 14 Service(s) and 1 Ingress(es) ...
+(3 allowlisted image difference(s), 1 object(s) only the plain path creates)`.
+
+**Третья волна: объекты вокруг пода.** Когда pod spec сошёлся, тот же вопрос, заданный на
+уровень выше, дал ещё два расхождения — в объектах, от которых зависит, дойдёт ли до этого
+пода хоть что-нибудь:
+
+| Объект | Поле | `manifests/` | чарт, было | Чем это стоило |
+| ------ | ---- | ------------ | ---------- | -------------- |
+| `Service` `carts`, `catalogue`, `front-end`, `orders`, `payment`, `shipping`, `user` | `annotations` | `prometheus.io/scrape: 'true'` | аннотаций нет вообще | Prometheus ищет цели этого стека по аннотации на *Service* (role: endpoints в `manifests-monitoring/04-prometheus-configmap.yaml`). Под чартом семь из восьми прикладных сервисов исчезли бы из `TARGETS`, и нигде не было бы ошибки — тот же отказ, что и с отсутствовавшим `rabbitmq-exporter`, только на уровень выше |
+| `Service` `queue-master` | `annotations` | нет, и в комментарии сказано почему | `prometheus.io/path: "/prometheus"` | Обратная ложь: queue-master отдаёт на `/metrics` JSON из Spring, а Prometheus-endpoint'а у него нет (`/actuator/prometheus` -> 404). Манифесты убрали аннотацию, когда она дала вечно горящий `ScrapeTargetDown`; чарт путь всё ещё обещал |
+| `Ingress` `front-end` | `labels` | `name: front-end` | `{}` (шаблон рендерил пустой `.Values.ingress.labels`) | Сегодня по этой метке ничего не селектится, так что это согласованность, а не баг. Но «те же объекты» обязано означать те же объекты, иначе гейт учит терпеть мелкие различия |
+
+Гейт расширен в той же правке, чтобы это не вернулось: `check-parity.py` теперь сравнивает
+ещё и каждый `Service` (`type`, метки, порты как name/port/targetPort/nodePort, аннотации),
+`Ingress` (`ingressClassName`, метки, аннотации и все правила) и инвентарь объектов обеих
+сторон. Инвентарь сразу поймал настоящую асимметрию: `manifests/` рендерит `Namespace`,
+чарт — нет, и это правильно, потому что `deploy.ps1 -Helm` ставит с `--create-namespace`;
+поэтому в allowlist внесена именно эта пара по имени (`ONLY_IN_MANIFESTS_OK`), а не целый
+kind. Семь свежих мутаций (снятая аннотация scrape, `targetPort` 8080, удалённый порт
+`exporter`, опустошённая метка Ingress, backend Ingress на 8080, удалённый Service,
+добавленный `ConfigMap`) дают exit 1 — последние две проверяют как раз инвентарь.
 
 Одна поправка к прежней версии этого раздела: там говорилось, что флаги `PermSize` не дадут поду
 чарта запуститься. Измерение это опровергает — OpenJDK 8 предупреждает и продолжает работу
