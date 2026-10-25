@@ -1339,9 +1339,11 @@ times slower to react to the same load (§14 is where that arithmetic was measur
 | `values.yaml`: `carts`, `orders`, `shipping`, `queue-master`, `user`, `catalogue` and `payment` aligned with `manifests/` | The two paths have to describe the same pod, and the manifests are the numbers measured on this stand |
 | `values.yaml`: the 7 datastores got `resources: {}` | `manifests/` sets nothing on them, and a request is not free - the scheduler admits pods on it |
 | `payment`'s `99m` copied verbatim, with a comment | "The same objects" includes the oddities; a checker that tolerated 99m vs 100m would tolerate the next 2000Mi |
-| New `deploy/kubernetes/helm-chart/check-parity.py` | Compares replicas, resources and image per workload, exits 1 on any disagreement |
+| New `deploy/kubernetes/helm-chart/check-parity.py` | Compares, workload by workload: `replicas`, **every** container's name and ports, and the first container's `image`, `command`, `args`, `env` and `resources`. Exits 1 on any disagreement |
 | CI: `Compare the rendered chart with manifests/` in `helm-chart-validate` (`pip install pyyaml`, then the script on the file the previous step already rendered) | Turns "the two paths describe the same pods" into a gate instead of a promise |
-| The 4 known image differences allowlisted **inside the script, each with its reason** | They are real disagreements that need a `-Helm` run to settle; the checker still fails on any *new* one |
+| CI renders with `--namespace sock-shop`, the way `deploy.ps1` installs | The chart interpolates `.Release.Namespace` into the pod spec (catalogue's `-DSN`, user's `-mongo-host`), so rendering in `default` compared a pod that is never deployed |
+| The 3 remaining image differences allowlisted **inside the script, each with its reason** | They are real disagreements that need a `-Helm` run to settle; the checker still fails on any *new* one. `rabbitmq` left the list when the chart was aligned |
+| Every container compared instead of `containers[0]` | The chart's RabbitMQ had lost the `rabbitmq-exporter` sidecar, and a script that reads only the first container cannot see a container that is not there |
 | `yamllint` removed from the CI-gates list in `README.md` | `git grep yamllint` finds it only in the two READMEs - no workflow ever ran it. A gate that does not exist is the same failure class as a chart that does not describe the same pods |
 
 **Verified on this checkout.**
@@ -1351,51 +1353,60 @@ times slower to react to the same load (§14 is where that arithmetic was measur
 | `helm lint deploy/kubernetes/helm-chart --strict` | exit 0, `1 chart(s) linted, 0 chart(s) failed` |
 | `helm template sock-shop deploy/kubernetes/helm-chart` | exit 0, 29 resources |
 | `kubeconform -strict -summary` on the rendered file, CI's own image, run locally | `29 resources found ... Valid: 29, Invalid: 0, Errors: 0` |
-| `check-parity.py rendered.yaml deploy/kubernetes/manifests` | exit 0, `agree on 14 workload(s): replicas, resources and image (4 allowlisted image difference(s))` |
-| The same script against a deliberately broken render (`--set carts.resources.requests.memory=2000Mi`) | exit 1, `Deployment/carts: resources differ` with both dicts - a checker that cannot fail is a rubber stamp |
+| `check-parity.py rendered.yaml deploy/kubernetes/manifests` | exit 0, `agree on 14 workload(s): replicas, containers (name + ports), image, command, args, env and resources (3 allowlisted image difference(s))` |
+| The same script against ten deliberately broken renders (a resource, an image, a replica count, a container name, a deleted sidecar, a port, `command`, `args`, an `env` name, an `env` value) | exit 1 every time, with the two values printed side by side - a checker that cannot fail is a rubber stamp |
 | Total memory requests, both paths | 1700 MiB each, down from 10036 MiB in the chart |
 
-**The limitation worth knowing.** The chart path still has never been installed
+**The second wave: the pod spec, not the resource contract.** Widening the comparison
+from `containers[0]` to every container, and from `resources` to `command`, `args` and
+`env`, found eight more differences. What matters is how each one was settled - by a
+measurement, never by "the two sides should look alike":
+
+| Workload | Field | `manifests/` | chart, before | What settled it |
+| -------- | ----- | ------------ | ------------- | --------------- |
+| `payment` | `containerPort` | 80 | 8080 | `/proc/net/tcp6` inside the running pod: one listening socket on `:0050`, none on `:1F90`. With 8080 the chart's Service would have had no backend at all |
+| `payment` | `command` | none | `["/app", "-decline=200"]` | The manifests pass no `-decline`, so the binary's own default runs there. Two paths declining at different basket totals is invisible to every schema check |
+| `rabbitmq` | image, ports, sidecar | `:3.6.8-management`, 15672 + 5672, `rabbitmq-exporter` on 9090 | `:3.6.8`, 5672, no sidecar | The Service annotation promises `:9090` to Prometheus; the chart path produced no RabbitMQ metrics at all and nothing failed |
+| `carts`, `orders`, `shipping` | `command` | none | `/usr/local/bin/java.sh -jar ./app.jar --port=<port>` | `docker inspect weaveworksdemos/carts:0.4.8`: the ENTRYPOINT **is** that command, and `java.sh` is `java $JAVA_OPTS $*` - the chart was restating the image |
+| `carts`, `orders`, `queue-master`, `shipping` | `JAVA_OPTS` | `-Xms64m -Xmx128m -XX:+UseG1GC ... -Dspring.zipkin.enabled=false` | the same **plus** `-XX:PermSize=32m -XX:MaxPermSize=64m`, **without** the zipkin flag | Measured on the image (OpenJDK 8u111): `PermSize` is ignored with `support was removed in 8.0` and exit 0 - noise, not the crash it looks like. The missing flag is the real one: without it Spring keeps posting spans to a `localhost:9411` that does not exist in the pod |
+| `catalogue`, `payment`, `user`, `shipping` | `ZIPKIN` | pointing at `zipkin.jaeger.svc.cluster.local` (shipping: a bare host) | only when `zipkin.enabled`, at `zipkin.zipkin.svc.cluster.local` - a Service that has never existed | Jaeger runs with `COLLECTOR_ZIPKIN_HTTP_PORT=:9411` behind the Service alias `zipkin` in namespace `jaeger` (§9), and `zipkin.enabled` also deploys a second collector plus a third MySQL |
+| `user` | Mongo address | env `mongo: user-db:27017`, no command | `-mongo-host=user-db.<release-ns>.svc.cluster.local:27017` **and** `MONGO_HOST` | The manifests run the image as-is with `mongo`, and that is the configuration this stand runs on. The chart's flags made the address depend on the release namespace |
+| `catalogue` | `args` | `["-port=80"]` | plus `-DSN=...@tcp(catalogue-db.<release-ns>.svc...)/socksdb` | The manifests rely on the binary's default DSN, and that default is what works here |
+
+Two of these were outright bugs that no render could show, because both sat in branches
+that were disabled or never taken: `shipping-dep.yaml` read `{{ .Values.zipkin.urlj }}`,
+a key that does not exist, and `catalogue-dep.yaml` gated `NET_BIND_SERVICE` on
+`.Values.carts.containerPort` instead of `.Values.catalogue.containerPort`.
+
+Re-checked after the change, on this checkout: `helm lint --strict` exit 0,
+`helm template ... --namespace sock-shop` renders 29 resources, `kubeconform -strict`
+reports `Valid: 29, Invalid: 0`, and `check-parity.py` exits 0 with `agree on 14
+workload(s): replicas, containers (name + ports), image, command, args, env and resources
+(3 allowlisted image difference(s))`.
+
+One correction to an earlier version of this section: it claimed the `PermSize` flags
+would stop a chart pod from starting. Measured, they do not - OpenJDK 8 warns and
+carries on (`exit 0`). The chart's JVM services would have run; they would just have been
+a different pod than the manifests', reporting spans to nothing.
+
+**What the gate still does not compare, on purpose.**
+
+| Field | Why it stays out |
+| ----- | ---------------- |
+| probes | The manifests rely on `availableReplicas`, the chart on container probes with upstream timings - an intentional difference, documented in the README. A gate that compared them would be permanently red, and an always-red gate is a gate nobody reads |
+| `nodeSelector` | All 14 `manifests/` pods pin `kubernetes.io/os: linux`; no chart template does. On a one-OS cluster the field changes nothing, so it is written down here instead of copied into 14 templates |
+
+**The limitation worth knowing.** The chart path has still never been installed
 end-to-end: `helm` refuses to adopt objects that an earlier `kubectl apply` created, so
-`.\deploy.ps1 -Helm` needs a fresh cluster, and that run is what would settle the four
-image questions. The checker also compares only replicas, resources and image - the rest
-of the pod spec is out of scope, and the next subsection lists exactly what that hides.
+`.\deploy.ps1 -Helm` needs a fresh cluster (`-Down`, then `-Helm`). Until that run, the
+supported claim is "the two paths render the same pod spec" - which is now checked field
+by field - not "the chart path serves traffic". The three allowlisted image differences
+are the same kind of debt: visible, counted, and waiting for that run.
 
-**What that scope leaves out.** Rendering both sides and diffing `env`,
-`containerPort`, `volumeMounts` and probes (the comparison the gate does *not* make)
-gives this:
-
-| Workload | Field | `manifests/` | chart |
-| -------- | ----- | ------------ | ----- |
-| `carts`, `orders`, `queue-master`, `shipping` | `JAVA_OPTS` | `-Xms64m -Xmx128m -XX:+UseG1GC ... -Dspring.zipkin.enabled=false` | the same **plus** `-XX:PermSize=32m -XX:MaxPermSize=64m`, **without** the zipkin flag |
-| `catalogue`, `payment` | `ZIPKIN` | `http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans` | not set |
-| `shipping` | `ZIPKIN` | `zipkin.jaeger.svc.cluster.local` | not set |
-| `user` | Mongo address | `mongo: user-db:27017` | `MONGO_HOST: user-db:27017` |
-| `payment` | `containerPort` | 80 | 8080 |
-| `rabbitmq` | ports | 15672 **and** 5672 | 5672 |
-| `carts`, `orders`, `queue-master`, `shipping` | `readinessProbe` | none - Ready comes from `availableReplicas` | 360 / 180 / 180 / 360 s |
-
-None of it is cosmetic. `PermSize` was removed in Java 11 and a modern JVM ignores the
-flag with a warning; without `-Dspring.zipkin.enabled=false` the chart's services keep
-looking for a tracing endpoint the chart never sets; `MONGO_HOST` versus `mongo` is two
-different names for the same address, and only one of them is what the manifests
-actually run on. The port one was measured rather than inferred: inside the running
-`payment` pod `cat /proc/net/tcp6` shows a single listening socket on `:0050` (port 80,
-state `0A`) and nothing on `:1F90` (8080), so the chart's Service at `targetPort: 8080`
-would have no backend and the checkout path would break.
-
-Why they are not in the gate yet: each one needs the chart's **templates** edited and
-then a `-Helm` run to prove the pods still come up - and that run needs a fresh cluster
-(`.\deploy.ps1 -Down`, then `-Helm`), because `helm` will not adopt `kubectl apply`'d
-objects. Changing them by inference from `manifests/` alone would replace a documented
-drift with an undocumented guess. The probes are a different case: the README already
-calls them an intentional difference, so a gate that compared them would be permanently
-red, and a gate that is always red is a gate nobody reads.
-
-So the honest claim today is narrower than "the same objects twice": **the chart's
-resource contract matches `manifests/`; its pod behaviour does not.** `-Helm` shows that
-the application can be packaged as a chart, and it renders and validates cleanly - it is
-not a drop-in second deployment path until those seven rows are reconciled on a cluster.
+That run is also how the remaining questions settle for good. `JAVA_OPTS`, `ZIPKIN` and
+the user service's database variable are now identical on both sides, but "identical to
+what the stand runs" is the entire argument - until the chart itself is deployed, no
+chart-specific behaviour is exercised at all.
 
 
 

@@ -283,11 +283,11 @@ Three limits are worth knowing before choosing this path:
 - `manifests/` stays the source of truth. The chart is the same objects written a
   second time, so a change lands in both or it is a bug. On top of `helm lint` and
   `kubeconform` - which only prove that each side is valid on its own - CI compares
-  the two (`deploy/kubernetes/helm-chart/check-parity.py`: replicas, resources and
-  image for all 14 workloads). Four image differences are allowlisted there, because
+  the two (`deploy/kubernetes/helm-chart/check-parity.py`: replicas, every
+  container's name and ports, and the image, `command`, `args`, `env` and resources
+  for all 14 workloads). Three image differences are allowlisted there, because
   neither side is obviously right: `mongo` vs `mongo:4.4.0` for the two Mongo
-  datastores, `rabbitmq:3.6.8-management` vs `rabbitmq:3.6.8`, and
-  `user-db:0.3.0` vs `0.4.0`.
+  datastores and `user-db:0.3.0` vs `0.4.0`.
 - Install into a **fresh** cluster. `helm` refuses to adopt objects that an earlier
   `kubectl apply` created (`invalid ownership metadata`), so switching paths on a
   live stand means `.\deploy.ps1 -Down` first.
