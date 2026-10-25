@@ -22,18 +22,17 @@ spec:
       containers:
       - name: payment
         image: {{if .Values.global.registry}}{{ .Values.global.registry }}/{{end}}{{ .Values.payment.image.repo }}:{{ .Values.payment.image.tag }}
-        command:
-        - /app
-        - -decline={{ .Values.payment.declinePaymentsOverAmount }}
+        # No command: manifests/15-payment-dep.yaml passes nothing, so the binary
+        # runs with its own default. The chart used to force `-decline=200`, which
+        # made the two paths decline at different amounts - a difference that no
+        # schema check can see, only a checkout over the threshold.
         resources:
 {{ toYaml .Values.payment.resources | indent 10 }}
         ports:
         - containerPort: {{ .Values.payment.containerPort }}
-        {{- if .Values.zipkin.enabled }}
         env:
         - name: ZIPKIN
-          value: http://{{ .Values.zipkin.url }}:9411/api/v1/spans
-        {{- end }}
+          value: {{ .Values.zipkin.endpoint | quote }}
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001

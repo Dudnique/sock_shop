@@ -22,18 +22,11 @@ spec:
       containers:
       - name: orders
         image: {{if .Values.global.registry}}{{ .Values.global.registry }}/{{end}}{{ .Values.orders.image.repo }}:{{ .Values.orders.image.tag }}
-        command:
-        - /usr/local/bin/java.sh
-        - -jar
-        - ./app.jar
-        - --port={{ .Values.orders.containerPort }}
+        # No command - same reasoning as carts-dep.yaml: the image entrypoint is
+        # the same four words, and the manifests use it.
         env:
-         {{- if .Values.zipkin.enabled }}
-         - name: ZIPKIN
-           value: {{ .Values.zipkin.url }}
-         {{- end }}
-         - name: JAVA_OPTS
-           value: {{ .Values.java.options }}
+        - name: JAVA_OPTS
+          value: {{ .Values.java.options | quote }}
         resources:
 {{ toYaml .Values.orders.resources | indent 10 }}
         ports:

@@ -23,14 +23,18 @@ spec:
       - name: catalogue
         image: {{if .Values.global.registry}}{{ .Values.global.registry }}/{{end}}{{ .Values.catalogue.image.repo }}:{{ .Values.catalogue.image.tag }}
         command: ["/app"]
+        # -port only. The chart used to add an explicit -DSN with the release
+        # namespace baked into it, while manifests/09-catalogue-dep.yaml passes
+        # nothing and lets the binary use its default (catalogue-db:3306, resolved
+        # in the pod's own namespace). Both work here, but the explicit one makes
+        # the pod spec depend on where the release is installed, and the value the
+        # chart rendered in any other namespace pointed at a database that does not
+        # exist.
         args:
         - -port={{ .Values.catalogue.containerPort }}
-        - -DSN=catalogue_user:default_password@tcp(catalogue-db.{{ .Release.Namespace }}.svc.cluster.local:3306)/socksdb
-        {{- if .Values.zipkin.enabled }}
         env:
-         - name: ZIPKIN
-           value: http://{{ .Values.zipkin.url }}:9411/api/v1/spans
-        {{- end }}
+        - name: ZIPKIN
+          value: {{ .Values.zipkin.endpoint | quote }}
         resources:
 {{ toYaml .Values.catalogue.resources | indent 10 }}
         ports:

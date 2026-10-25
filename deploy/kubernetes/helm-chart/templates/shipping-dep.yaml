@@ -22,18 +22,17 @@ spec:
       containers:
       - name: shipping
         image: {{if .Values.global.registry}}{{ .Values.global.registry }}/{{end}}{{ .Values.shipping.image.repo }}:{{ .Values.shipping.image.tag }}
-        command:
-        - /usr/local/bin/java.sh
-        - -jar
-        - ./app.jar
-        - --port={{ .Values.shipping.containerPort }}
+        # No command: the image entrypoint already ends in --port=80 and the
+        # manifests run it that way (see carts-dep.yaml for the `docker inspect`).
         env:
-        {{- if .Values.zipkin.enabled }}
-         - name: ZIPKIN
-           value: {{ .Values.zipkin.urlj }}
-        {{- end }}
-         - name: JAVA_OPTS
-           value: {{ .Values.java.options }}
+        # A bare host, no scheme and no path - deliberately identical to
+        # manifests/23-shipping-dep.yaml. Shipping's JAVA_OPTS disable Spring's
+        # zipkin reporter, so the value cannot take effect; it is mirrored so the
+        # two paths describe the same pod.
+        - name: ZIPKIN
+          value: {{ .Values.zipkin.shippingEndpoint | quote }}
+        - name: JAVA_OPTS
+          value: {{ .Values.java.options | quote }}
         resources:
 {{ toYaml .Values.shipping.resources | indent 10 }}
         ports:

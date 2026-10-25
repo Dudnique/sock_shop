@@ -22,23 +22,21 @@ spec:
       containers:
       - name: user
         image: {{if .Values.global.registry}}{{ .Values.global.registry }}/{{end}}{{ .Values.user.image.repo }}:{{ .Values.user.image.tag }}
-        command:
-        - /user
-        args:
-        - -port={{ .Values.user.containerPort }}
-        - -database=mongodb
-        - -mongo-host=user-db.{{ .Release.Namespace }}.svc.cluster.local:27017
+        # No command, no args: manifests/25-user-dep.yaml runs the image as-is and
+        # configures the database through the environment. The chart used to pass
+        # -port, -database and -mongo-host (the last one with the release namespace
+        # spliced in) *and* set a MONGO_HOST variable - two ways to say the same
+        # thing, and the one that differs between namespaces was the one being used.
+        # `mongo` is the variable the manifests set and the one the stand runs on.
         resources:
 {{ toYaml .Values.user.resources | indent 10 }}
         ports:
         - containerPort: {{ .Values.user.containerPort }}
         env:
-        - name: MONGO_HOST
+        - name: mongo
           value: user-db:27017
-        {{- if .Values.zipkin.enabled }}
         - name: ZIPKIN
-          value: http://{{ .Values.zipkin.url }}:9411/api/v1/spans
-        {{- end }}
+          value: {{ .Values.zipkin.endpoint | quote }}
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001

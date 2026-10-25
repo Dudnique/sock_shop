@@ -20,20 +20,16 @@ spec:
       {{- end }}
     spec:
       containers:
-      - command:
-        - /usr/local/bin/java.sh
-        - -jar
-        - ./app.jar
-        - --port={{ .Values.carts.containerPort }}
-        name: carts
+      - name: carts
         image: {{if .Values.global.registry}}{{ .Values.global.registry }}/{{end}}{{ .Values.carts.image.repo }}:{{ .Values.carts.image.tag }}
+        # No command: `docker inspect weaveworksdemos/carts:0.4.8` shows the
+        # ENTRYPOINT is already `/usr/local/bin/java.sh -jar ./app.jar --port=80`,
+        # and that script is `java $JAVA_OPTS $*`. Copying the entrypoint into the
+        # chart was a second source of truth for the same thing - the manifests
+        # rely on the image default, so does this now.
         env:
-         {{- if .Values.zipkin.enabled }}
-         - name: ZIPKIN
-           value: {{ .Values.zipkin.url }}
-         {{- end }}
-         - name: JAVA_OPTS
-           value: {{ .Values.java.options }}
+        - name: JAVA_OPTS
+          value: {{ .Values.java.options | quote }}
         resources:
 {{ toYaml .Values.carts.resources | indent 10 }}
         ports:

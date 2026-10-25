@@ -27,6 +27,9 @@ What is compared, per workload:
     `rabbitmq-exporter` sidecar and the earlier version of this script could not
     have noticed, because it only ever looked at the first container.
   * the first container's `image`
+  * the first container's `command`, `args` and `env` (name/value pairs, order
+    ignored) - this is where `-decline=200`, `-mongo-host=...<namespace>...` and
+    the `PermSize` flags lived, all invisible to every other check in CI
   * the first container's `resources` (requests and limits, as whole dicts)
 
 Deliberately not compared (each one is a documented decision in FIXES.md
@@ -35,9 +38,9 @@ to change):
 
   * probes - the manifests rely on `availableReplicas`, the chart on container
     probes with upstream timings
-  * `nodeSelector`, `env`, `command`/`args` - still drifting; the second column of
-    section 23 lists them. They join the gate in the same commit that reconciles
-    them, not before.
+  * `nodeSelector` - every manifests/ pod pins `kubernetes.io/os: linux`, no chart
+    template does. On a one-OS cluster the field is inert, so it is documented
+    rather than copied into 14 templates.
 
 Exit code is 1 on any mismatch, 0 when the two sides agree.
 """
@@ -119,6 +122,19 @@ def summarise(docs):
                 for container in containers
             ),
             first.get("image"),
+            # command/args/env of the first container: these decide which binary
+            # runs and which database it talks to. The chart used to pass
+            # `-decline=200` where the manifests pass nothing, and no schema check
+            # can see that; `env` is compared as a sorted (name, value) list, so
+            # only content is compared, not the order it was written in.
+            tuple(first.get("command") or ()),
+            tuple(first.get("args") or ()),
+            tuple(
+                sorted(
+                    (item.get("name"), str(item.get("value")))
+                    for item in (first.get("env") or [])
+                )
+            ),
             first.get("resources") or {},
         )
     return out
@@ -157,8 +173,24 @@ def main(argv):
     for key in sorted(set(expected) & set(actual)):
         compared += 1
         name = key[1]
-        exp_replicas, exp_containers, exp_image, exp_res = expected[key]
-        act_replicas, act_containers, act_image, act_res = actual[key]
+        (
+            exp_replicas,
+            exp_containers,
+            exp_image,
+            exp_command,
+            exp_args,
+            exp_env,
+            exp_res,
+        ) = expected[key]
+        (
+            act_replicas,
+            act_containers,
+            act_image,
+            act_command,
+            act_args,
+            act_env,
+            act_res,
+        ) = actual[key]
 
         if exp_replicas != act_replicas:
             problems.append(
@@ -171,6 +203,27 @@ def main(argv):
                 f"{key[0]}/{name}: containers differ (name, containerPorts)\n"
                 f"    manifests/: {exp_containers}\n"
                 f"    chart     : {act_containers}"
+            )
+
+        if exp_command != act_command:
+            problems.append(
+                f"{key[0]}/{name}: command differs\n"
+                f"    manifests/: {list(exp_command)}\n"
+                f"    chart     : {list(act_command)}"
+            )
+
+        if exp_args != act_args:
+            problems.append(
+                f"{key[0]}/{name}: args differ\n"
+                f"    manifests/: {list(exp_args)}\n"
+                f"    chart     : {list(act_args)}"
+            )
+
+        if exp_env != act_env:
+            problems.append(
+                f"{key[0]}/{name}: env differs\n"
+                f"    manifests/: {list(exp_env)}\n"
+                f"    chart     : {list(act_env)}"
             )
 
         if exp_res != act_res:
@@ -205,7 +258,7 @@ def main(argv):
     )
     print(
         f"chart and manifests/ agree on {compared} workload(s): replicas, containers "
-        f"(name + ports), resources and image "
+        f"(name + ports), image, command, args, env and resources "
         f"({allowlisted} allowlisted image difference(s))"
     )
     return 0

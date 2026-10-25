@@ -11,7 +11,15 @@ global:
     registry: ''
 
 java:
-    options: -Xms64m -Xmx128m -XX:PermSize=32m -XX:MaxPermSize=64m -XX:+UseG1GC -Djava.security.egd=file:/dev/urandom
+    # Byte-identical to the JAVA_OPTS in manifests/, i.e. to what the stand
+    # actually runs. Measured on the image (weaveworksdemos/carts:0.4.8, OpenJDK
+    # 8u111): the chart used to add -XX:PermSize=32m -XX:MaxPermSize=64m and the
+    # JVM answers "ignoring option ...; support was removed in 8.0" - harmless,
+    # but a different pod for no benefit. The flag the chart was missing is the
+    # one that matters: without -Dspring.zipkin.enabled=false Spring's reporter
+    # keeps trying to POST spans to localhost:9411 inside the pod, where nothing
+    # listens.
+    options: -Xms64m -Xmx128m -XX:+UseG1GC -Djava.security.egd=file:/dev/urandom -Dspring.zipkin.enabled=false
 
 istio:
     enabled: false
@@ -122,6 +130,9 @@ payment:
         repo: weaveworksdemos/payment
         tag: 0.4.3
     declinePaymentsOverAmount: 200
+    # ^ kept for compatibility with upstream values files, but nothing reads it:
+    # the deployment passes no -decline at all, exactly like the manifests. The
+    # image's own default is what runs (see payment-dep.yaml).
     # 80, not 8080: 8080 is the port the chart *assumed*, and it is not the one
     # the image uses. Measured inside the running pod - /proc/net/tcp6 has a
     # single listening socket on :0050 (80) and nothing on :1F90 (8080) - and
@@ -233,8 +244,24 @@ zipkin:
         requests:
             cpu: 100m
             memory: 300Mi
-    enabled:  false
-    url: zipkin.zipkin.svc.cluster.local
+    # The bundled tracing stack (zipkin + zipkin-mysql + zipkin-cron) - and it
+    # stays off, not because tracing is off: the Jaeger instance in namespace
+    # `jaeger` runs with COLLECTOR_ZIPKIN_HTTP_PORT=:9411 and publishes a Service
+    # alias named `zipkin`, so the application already has a receiver. Enabling
+    # this would add a third MySQL and a second collector for data Jaeger stores.
+    enabled: false
+    # What the tracers receive, byte-identical to manifests/ (catalogue, payment,
+    # user). The chart used to build the address from `url:
+    # zipkin.zipkin.svc.cluster.local` - a Service that has never existed on this
+    # stand - and only when `enabled` was true, which is why no chart pod ever
+    # carried a working tracer address.
+    endpoint: http://zipkin.jaeger.svc.cluster.local:9411/api/v1/spans
+    # shipping is the exception: manifests/23-shipping-dep.yaml gives it a bare
+    # host, no scheme and no path, and its JAVA_OPTS disable Spring's zipkin
+    # reporter, so that value is inert. Mirrored verbatim - rewriting it would be
+    # an untested tracing change, and differing from it would be a difference the
+    # parity gate reports.
+    shippingEndpoint: zipkin.jaeger.svc.cluster.local
 
 zipkinmysql:
     image:
