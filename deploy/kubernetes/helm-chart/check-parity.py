@@ -32,6 +32,21 @@ What is compared, per workload:
     the `PermSize` flags lived, all invisible to every other check in CI
   * the first container's `resources` (requests and limits, as whole dicts)
 
+Beyond the workloads, the objects that carry the app's network contract:
+
+  * every `Service`: `type`, `labels`, `ports` (name, port, targetPort, nodePort) and
+    `annotations` - the annotations are not decoration. Prometheus discovers targets
+    through `prometheus.io/scrape` on the Service (role: endpoints in
+    manifests-monitoring/04-prometheus-configmap.yaml), so a chart that drops the
+    annotation silently drops the metrics. The chart used to drop it on seven
+    Services and, on queue-master, to announce `prometheus.io/path: /prometheus` for
+    a service that has no Prometheus endpoint at all.
+  * the `Ingress`: `ingressClassName`, `labels`, `annotations` and every rule (host,
+    path, pathType, backend service name and port).
+  * the object inventory: a kind/name that exists on one side and not the other is a
+    failure, except for the release `Namespace` - `deploy.ps1 -Helm` installs with
+    `--create-namespace`, so the chart renders no Namespace and never should.
+
 Deliberately not compared (each one is a documented decision in FIXES.md
 section 23, and a gate that compared them would be red for reasons nobody intends
 to change):
@@ -76,6 +91,10 @@ KNOWN_IMAGE_DIFFS = {
 }
 
 WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
+
+# Objects the plain path creates that the chart legitimately does not: the release
+# namespace itself, because `deploy.ps1 -Helm` passes `--create-namespace`.
+ONLY_IN_MANIFESTS_OK = {("Namespace", "sock-shop")}
 
 
 def load_rendered(path):
@@ -140,6 +159,75 @@ def summarise(docs):
     return out
 
 
+def summarise_services(docs):
+    """Map ('Service', name) -> (type, labels, ports, annotations)."""
+    out = {}
+    for doc in docs:
+        if doc.get("kind") != "Service":
+            continue
+        meta = doc["metadata"]
+        spec = doc.get("spec") or {}
+        out[("Service", meta["name"])] = (
+            spec.get("type"),
+            meta.get("labels") or {},
+            # Written as a sorted tuple so a reordering in the YAML is not a diff,
+            # while a changed port or targetPort is. `targetPort` is stringified
+            # because the chart renders it either as 80 or as a port *name*.
+            tuple(
+                sorted(
+                    (
+                        port.get("name"),
+                        port.get("port"),
+                        str(port.get("targetPort")),
+                        port.get("nodePort"),
+                    )
+                    for port in (spec.get("ports") or [])
+                )
+            ),
+            meta.get("annotations") or {},
+        )
+    return out
+
+
+def summarise_ingress(docs):
+    """Map ('Ingress', name) -> (className, labels, annotations, rules)."""
+    out = {}
+    for doc in docs:
+        if doc.get("kind") != "Ingress":
+            continue
+        meta = doc["metadata"]
+        spec = doc.get("spec") or {}
+        rules = []
+        for rule in spec.get("rules") or []:
+            for path in ((rule.get("http") or {}).get("paths") or []):
+                service = (path.get("backend") or {}).get("service") or {}
+                rules.append(
+                    (
+                        rule.get("host"),
+                        path.get("path"),
+                        path.get("pathType"),
+                        service.get("name"),
+                        (service.get("port") or {}).get("number"),
+                    )
+                )
+        out[("Ingress", meta["name"])] = (
+            spec.get("ingressClassName"),
+            meta.get("labels") or {},
+            meta.get("annotations") or {},
+            tuple(rules),
+        )
+    return out
+
+
+def inventory(docs):
+    """Every (kind, name) a side renders, for the presence check."""
+    return {
+        (doc.get("kind"), doc["metadata"]["name"])
+        for doc in docs
+        if doc.get("kind") and doc.get("metadata", {}).get("name")
+    }
+
+
 def main(argv):
     import glob
     import os
@@ -158,16 +246,21 @@ def main(argv):
                     if isinstance(doc, dict)
                 )
 
+    rendered = load_rendered(rendered_path)
+
     expected = summarise(manifests)
-    actual = summarise(load_rendered(rendered_path))
+    actual = summarise(rendered)
 
     problems = []
-    for key in sorted(set(expected) - set(actual)):
-        problems.append(f"{key[0]}/{key[1]}: missing from the chart")
-    for key in sorted(set(actual) - set(expected)):
-        problems.append(
-            f"{key[0]}/{key[1]}: rendered by the chart, absent from manifests/"
-        )
+
+    # Presence, for every kind the two sides produce - not just the workloads, so a
+    # Service that only one side creates is caught too. The release Namespace is the
+    # one allowed asymmetry (`--create-namespace`).
+    only_plain = inventory(manifests) - inventory(rendered) - ONLY_IN_MANIFESTS_OK
+    for kind, name in sorted(only_plain):
+        problems.append(f"{kind}/{name}: exists in manifests/, the chart renders no such object")
+    for kind, name in sorted(inventory(rendered) - inventory(manifests)):
+        problems.append(f"{kind}/{name}: rendered by the chart, absent from manifests/")
 
     compared = 0
     for key in sorted(set(expected) & set(actual)):
@@ -247,6 +340,61 @@ def main(argv):
                     f"{known[1]!r} vs {known[0]!r}, so this is a new one"
                 )
 
+    # --- Services: the network contract -------------------------------------
+    exp_svc = summarise_services(manifests)
+    act_svc = summarise_services(rendered)
+
+    compared_svc = 0
+    for key in sorted(set(exp_svc) & set(act_svc)):
+        compared_svc += 1
+        exp_type, exp_labels, exp_ports, exp_annotations = exp_svc[key]
+        act_type, act_labels, act_ports, act_annotations = act_svc[key]
+        name = key[1]
+
+        if exp_type != act_type:
+            problems.append(
+                f"Service/{name}: type {act_type!r} in the chart, {exp_type!r} in manifests/"
+            )
+        if exp_labels != act_labels:
+            problems.append(
+                f"Service/{name}: labels differ\n"
+                f"    manifests/: {exp_labels}\n"
+                f"    chart     : {act_labels}"
+            )
+        if exp_ports != act_ports:
+            problems.append(
+                f"Service/{name}: ports differ (name, port, targetPort, nodePort)\n"
+                f"    manifests/: {list(exp_ports)}\n"
+                f"    chart     : {list(act_ports)}"
+            )
+        if exp_annotations != act_annotations:
+            problems.append(
+                f"Service/{name}: annotations differ - for this stack they decide what "
+                f"Prometheus scrapes\n"
+                f"    manifests/: {exp_annotations}\n"
+                f"    chart     : {act_annotations}"
+            )
+
+    # --- Ingress: the only way into the app ---------------------------------
+    exp_ing = summarise_ingress(manifests)
+    act_ing = summarise_ingress(rendered)
+
+    compared_ing = 0
+    for key in sorted(set(exp_ing) & set(act_ing)):
+        compared_ing += 1
+        name = key[1]
+        for field, exp_value, act_value in zip(
+            ("ingressClassName", "labels", "annotations", "rules"),
+            exp_ing[key],
+            act_ing[key],
+        ):
+            if exp_value != act_value:
+                problems.append(
+                    f"Ingress/{name}: {field} differ\n"
+                    f"    manifests/: {exp_value}\n"
+                    f"    chart     : {act_value}"
+                )
+
     if problems:
         print(f"chart and manifests/ disagree ({len(problems)} problem(s)):")
         for problem in problems:
@@ -257,9 +405,12 @@ def main(argv):
         [k for k in set(expected) & set(actual) if k[1] in KNOWN_IMAGE_DIFFS]
     )
     print(
-        f"chart and manifests/ agree on {compared} workload(s): replicas, containers "
-        f"(name + ports), image, command, args, env and resources "
-        f"({allowlisted} allowlisted image difference(s))"
+        f"chart and manifests/ agree on {compared} workload(s), {compared_svc} "
+        f"Service(s) and {compared_ing} Ingress(es) - workloads: replicas, containers "
+        f"(name + ports), image, command, args, env, resources; Services: type, "
+        f"labels, ports, annotations; Ingress: class, labels, annotations, rules "
+        f"({allowlisted} allowlisted image difference(s), "
+        f"{len(ONLY_IN_MANIFESTS_OK)} object(s) only the plain path creates)"
     )
     return 0
 

@@ -5,6 +5,8 @@ metadata:
   name: orders
   labels:
     name: orders
+  annotations:
+    prometheus.io/scrape: 'true' # as in manifests/12-orders-svc.yaml
 spec:
   ports:
     # the port that this service should serve on

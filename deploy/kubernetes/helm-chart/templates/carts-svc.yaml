@@ -5,6 +5,11 @@ metadata:
   name: carts
   labels:
     name: carts
+  annotations:
+    # Prometheus discovers this Service by annotation (role: endpoints in
+    # manifests-monitoring/04-prometheus-configmap.yaml); manifests/02-carts-svc.yaml
+    # carries the same line.
+    prometheus.io/scrape: 'true'
 spec:
   ports:
     # the port that this service should serve on

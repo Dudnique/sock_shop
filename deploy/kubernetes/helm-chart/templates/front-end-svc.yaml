@@ -5,6 +5,8 @@ metadata:
   name: front-end
   labels:
     name: front-end
+  annotations:
+    prometheus.io/scrape: 'true' # as in manifests/10-front-end-svc.yaml
 spec:
   # ClusterIP: the app is reached through the Ingress (Traefik); no NodePort needed.
   ports:

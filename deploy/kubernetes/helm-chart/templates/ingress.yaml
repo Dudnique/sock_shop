@@ -3,7 +3,10 @@ kind: Ingress
 metadata:
   name: front-end
   labels:
-{{ toYaml .Values.ingress.labels | indent 4 }}
+    name: front-end
+{{- with .Values.ingress.labels }}
+{{ toYaml . | indent 4 }}
+{{- end }}
 {{- with .Values.ingress.annotations }}
   annotations:
 {{ toYaml . | indent 4 }}

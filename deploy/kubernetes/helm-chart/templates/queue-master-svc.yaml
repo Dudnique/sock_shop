@@ -5,8 +5,12 @@ metadata:
   name: queue-master
   labels:
     name: queue-master
-  annotations:
-    prometheus.io/path: "/prometheus"
+  # No prometheus.io/scrape on purpose, and no prometheus.io/path either: the
+  # chart used to announce /prometheus here, but queue-master answers on
+  # /metrics with Spring's JSON and has no Prometheus endpoint at all
+  # (/actuator/prometheus -> 404). The manifests dropped that annotation after
+  # it produced a ScrapeTargetDown that was permanently firing
+  # (manifests/18-queue-master-svc.yaml carries the long version of this note).
 spec:
   ports:
     # the port that this service should serve on

@@ -5,6 +5,8 @@ metadata:
   name: user
   labels:
     name: user
+  annotations:
+    prometheus.io/scrape: 'true' # as in manifests/26-user-svc.yaml
 spec:
   ports:
     # the port that this service should serve on

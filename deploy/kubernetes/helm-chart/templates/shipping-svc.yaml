@@ -5,6 +5,8 @@ metadata:
   name: shipping
   labels:
     name: shipping
+  annotations:
+    prometheus.io/scrape: 'true' # as in manifests/24-shipping-svc.yaml
 spec:
   ports:
     # the port that this service should serve on
