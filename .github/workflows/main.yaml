@@ -192,10 +192,12 @@ jobs:
   #      manifests. This keeps the two deploy paths (plain YAML and Helm) equally
   #      verified.
   #    - Finally the rendered chart is compared with manifests/ object by object
-  #      (check-parity.py: replicas, resources, image). "Both sides render and
-  #      validate" is not the same as "both sides describe the same pod", and that
-  #      gap is how the chart drifted to 2000Mi of memory requests per JVM service
-  #      (~10 GiB in total, on an 8 GB stand) with CI green throughout.
+  #      (check-parity.py: replicas, every container's name and ports, resources,
+  #      image). "Both sides render and validate" is not the same as "both sides
+  #      describe the same pod", and that gap is how the chart drifted to 2000Mi
+  #      of memory requests per JVM service (~10 GiB in total, on an 8 GB stand)
+  #      with CI green throughout - and, more quietly, how its RabbitMQ lost the
+  #      Prometheus exporter sidecar without a single red run.
   # ---------------------------------------------------------------------------
   helm-chart-validate:
     runs-on: ubuntu-latest
@@ -209,7 +211,12 @@ jobs:
       run: helm lint deploy/kubernetes/helm-chart --strict
     - name: Render chart and validate rendered manifests
       run: |
-        helm template sock-shop deploy/kubernetes/helm-chart > rendered.yaml
+        # --namespace sock-shop, not the implicit `default`: the chart interpolates
+        # .Release.Namespace into the catalogue DSN and the user -mongo-host flag,
+        # so the namespace is part of the pod spec. Rendering the way deploy.ps1
+        # installs (--namespace sock-shop) is what makes the parity step below
+        # compare the pod that actually runs.
+        helm template sock-shop deploy/kubernetes/helm-chart --namespace sock-shop > rendered.yaml
         docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:latest \
           -strict -summary -ignore-missing-schemas /work/rendered.yaml
     - name: Compare the rendered chart with manifests/

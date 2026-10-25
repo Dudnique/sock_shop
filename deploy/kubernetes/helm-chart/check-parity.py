@@ -9,17 +9,35 @@ the two sides agreeing, and that is precisely how the chart drifted: it asked fo
 out of 8 GB - while the manifests, and everything measured on the stand, were
 tuned to 200Mi-300Mi. CI was green the whole time.
 
-Usage (exactly what the workflow runs):
+Usage (exactly what the workflow runs). The release namespace is not cosmetic:
+the chart builds service addresses from `.Release.Namespace` (catalogue's `-DSN`,
+user's `-mongo-host`), so rendering without `--namespace sock-shop` compares a pod
+that is never deployed against the one that is.
 
-    helm template sock-shop deploy/kubernetes/helm-chart > rendered.yaml
-    python3 deploy/kubernetes/helm-chart/check-parity.py rendered.yaml \\
+    helm template sock-shop deploy/kubernetes/helm-chart --namespace sock-shop \
+        > rendered.yaml
+    python3 deploy/kubernetes/helm-chart/check-parity.py rendered.yaml \
         deploy/kubernetes/manifests
 
 What is compared, per workload:
 
   * `spec.replicas`
+  * every container of the pod: its `name` and its `containerPort`s - every
+    container, not `containers[0]`. The chart's RabbitMQ had lost its
+    `rabbitmq-exporter` sidecar and the earlier version of this script could not
+    have noticed, because it only ever looked at the first container.
   * the first container's `image`
   * the first container's `resources` (requests and limits, as whole dicts)
+
+Deliberately not compared (each one is a documented decision in FIXES.md
+section 23, and a gate that compared them would be red for reasons nobody intends
+to change):
+
+  * probes - the manifests rely on `availableReplicas`, the chart on container
+    probes with upstream timings
+  * `nodeSelector`, `env`, `command`/`args` - still drifting; the second column of
+    section 23 lists them. They join the gate in the same commit that reconciles
+    them, not before.
 
 Exit code is 1 on any mismatch, 0 when the two sides agree.
 """
@@ -49,9 +67,6 @@ KNOWN_IMAGE_DIFFS = {
     # working carts-db on a different MongoDB major.
     "carts-db": ("mongo", "mongo:4.4.0"),
     "orders-db": ("mongo", "mongo:4.4.0"),
-    # The management plugin serves the :15672 UI. Nothing in manifests-monitoring
-    # scrapes it, but the stand has always run the -management image.
-    "rabbitmq": ("rabbitmq:3.6.8-management", "rabbitmq:3.6.8"),
     # The user database schema version, not just a patch: 0.3.0 is what the `user`
     # service has been tested against here.
     "user-db": ("weaveworksdemos/user-db:0.3.0", "weaveworksdemos/user-db:0.4.0"),
@@ -77,18 +92,34 @@ def load_rendered(path):
 
 
 def summarise(docs):
-    """Map (kind, name) -> (replicas, image, resources) for every workload."""
+    """Map (kind, name) -> (replicas, containers, image, resources)."""
     out = {}
     for doc in docs:
         kind = doc.get("kind")
         if kind not in WORKLOAD_KINDS or doc["metadata"]["name"] in SKIP:
             continue
         spec = doc["spec"]
-        container = spec["template"]["spec"]["containers"][0]
+        containers = spec["template"]["spec"]["containers"]
+        first = containers[0]
         out[(kind, doc["metadata"]["name"])] = (
             spec.get("replicas"),
-            container.get("image"),
-            container.get("resources") or {},
+            # Every container, by name and with its port numbers: a name change
+            # or a lost sidecar is a different pod, not a formatting detail.
+            tuple(
+                (
+                    container.get("name"),
+                    tuple(
+                        sorted(
+                            port["containerPort"]
+                            for port in (container.get("ports") or [])
+                            if port.get("containerPort") is not None
+                        )
+                    ),
+                )
+                for container in containers
+            ),
+            first.get("image"),
+            first.get("resources") or {},
         )
     return out
 
@@ -126,13 +157,20 @@ def main(argv):
     for key in sorted(set(expected) & set(actual)):
         compared += 1
         name = key[1]
-        exp_replicas, exp_image, exp_res = expected[key]
-        act_replicas, act_image, act_res = actual[key]
+        exp_replicas, exp_containers, exp_image, exp_res = expected[key]
+        act_replicas, act_containers, act_image, act_res = actual[key]
 
         if exp_replicas != act_replicas:
             problems.append(
                 f"{key[0]}/{name}: replicas {act_replicas} in the chart, "
                 f"{exp_replicas} in manifests/"
+            )
+
+        if exp_containers != act_containers:
+            problems.append(
+                f"{key[0]}/{name}: containers differ (name, containerPorts)\n"
+                f"    manifests/: {exp_containers}\n"
+                f"    chart     : {act_containers}"
             )
 
         if exp_res != act_res:
@@ -166,8 +204,9 @@ def main(argv):
         [k for k in set(expected) & set(actual) if k[1] in KNOWN_IMAGE_DIFFS]
     )
     print(
-        f"chart and manifests/ agree on {compared} workload(s): replicas, resources "
-        f"and image ({allowlisted} allowlisted image difference(s))"
+        f"chart and manifests/ agree on {compared} workload(s): replicas, containers "
+        f"(name + ports), resources and image "
+        f"({allowlisted} allowlisted image difference(s))"
     )
     return 0
 

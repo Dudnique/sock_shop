@@ -5,10 +5,22 @@ metadata:
   name: rabbitmq
   labels:
     name: rabbitmq
+  annotations:
+    # Prometheus discovers targets by the *Service* annotation (role: endpoints
+    # in manifests-monitoring/04-prometheus-configmap.yaml), so this pair is what
+    # makes RabbitMQ metrics exist at all. manifests/20-rabbitmq-svc.yaml carries
+    # the same two lines, and the port below is the one the exporter listens on.
+    prometheus.io/scrape: 'true'
+    prometheus.io/port: '9090'
 spec:
   ports:
     # the port that this service should serve on
   - port: 5672
+    name: rabbitmq
     targetPort: 5672
+  - port: 9090
+    name: exporter
+    targetPort: exporter
+    protocol: TCP
   selector:
     name: rabbitmq

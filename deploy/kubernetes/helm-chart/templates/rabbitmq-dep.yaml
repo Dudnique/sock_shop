@@ -14,12 +14,20 @@ spec:
     metadata:
       labels:
         name: rabbitmq
+      annotations:
+        # The Service carries the scrape annotation (see rabbitmq-svc.yaml). A
+        # pod-level "true" would register the same exporter twice; the manifests
+        # say "false" here for exactly that reason.
+        prometheus.io/scrape: "false"
     spec:
       containers:
       - name: rabbitmq
         image: {{if .Values.global.registry}}{{ .Values.global.registry }}/{{end}}{{ .Values.rabbitmq.image.repo }}:{{ .Values.rabbitmq.image.tag }}
         ports:
+        - containerPort: 15672
+          name: management
         - containerPort: 5672
+          name: rabbitmq
         resources:
 {{ toYaml .Values.rabbitmq.resources | indent 10 }}
         securityContext:
@@ -32,3 +40,18 @@ spec:
               - SETUID
               - DAC_OVERRIDE
           readOnlyRootFilesystem: true
+      # Metrics for Prometheus, the same sidecar manifests/19-rabbitmq-dep.yaml
+      # runs. Without it the chart path had no RabbitMQ metrics at all and
+      # nothing failed: the application kept working, the queue kept working,
+      # and the only symptom was an empty Grafana panel nobody was looking at.
+      - name: rabbitmq-exporter
+        image: {{if .Values.global.registry}}{{ .Values.global.registry }}/{{end}}{{ .Values.rabbitmq.exporter.repo }}:{{ .Values.rabbitmq.exporter.tag }}
+        # The image defaults to 9419; the Service, the scrape annotation and the
+        # manifests all promise 9090. Pinning the port here is what makes the
+        # scrape succeed (the manifests carry the same comment for the same bug).
+        env:
+        - name: PUBLISH_PORT
+          value: "9090"
+        ports:
+        - containerPort: 9090
+          name: exporter

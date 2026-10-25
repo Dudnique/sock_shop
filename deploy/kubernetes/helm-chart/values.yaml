@@ -122,7 +122,14 @@ payment:
         repo: weaveworksdemos/payment
         tag: 0.4.3
     declinePaymentsOverAmount: 200
-    containerPort: 8080
+    # 80, not 8080: 8080 is the port the chart *assumed*, and it is not the one
+    # the image uses. Measured inside the running pod - /proc/net/tcp6 has a
+    # single listening socket on :0050 (80) and nothing on :1F90 (8080) - and
+    # manifests/15-payment-dep.yaml agrees, Service and probes included. With
+    # 8080 the chart's Service had no backend at all, so the checkout path would
+    # have broken on the first `-Helm` run. The template adds NET_BIND_SERVICE
+    # when the port is below 1024, which is how a non-root container binds it.
+    containerPort: 80
     # 99m, not 100m: manifests/15-payment-dep.yaml says 99m and the two paths have
     # to render the same pod, oddity included.
     resources:
@@ -147,8 +154,19 @@ queuemaster:
 
 rabbitmq:
     image:
+        # -management, not the bare image: the tag is what enables the plugin
+        # behind the :15672 HTTP API and UI. manifests/19-rabbitmq-dep.yaml has
+        # always run this tag, and the exporter below scrapes that API - with
+        # the bare image there would be nothing to scrape.
         repo: rabbitmq
-        tag: 3.6.8
+        tag: 3.6.8-management
+    # The same sidecar as manifests/19-rabbitmq-dep.yaml: it reads the management
+    # API on localhost:15672 and publishes Prometheus metrics on 9090, which is
+    # the port the Service annotation advertises. Left untagged exactly like the
+    # manifests - pinning one side only would be a difference the gate cannot see.
+    exporter:
+        repo: kbudde/rabbitmq-exporter
+        tag: latest
     resources: {}
 
 sessiondb:

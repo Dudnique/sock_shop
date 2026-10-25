@@ -38,7 +38,7 @@ spec:
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001
-{{- if lt (int .Values.carts.containerPort) 1024 }}
+{{- if lt (int .Values.catalogue.containerPort) 1024 }}
           capabilities:
             drop:
               - all
