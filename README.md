@@ -269,8 +269,14 @@ rendered output):
 ```powershell
 .\deploy.ps1 -Helm     # the application comes from the chart; everything else is unchanged
 # or by hand, on a cluster Terraform already created:
-helm upgrade --install sock-shop deploy\kubernetes\helm-chart --namespace sock-shop --create-namespace
+helm upgrade --install sock-shop deploy\kubernetes\helm-chart --namespace sock-shop --create-namespace `
+    --server-side=true --force-conflicts
 ```
+
+`--force-conflicts` is not decoration: once the HPAs have resized a deployment, the
+autoscaler owns `spec.replicas`, and a server-side apply that insists on the
+chart's value fails with `conflict with "k3s" with subresource "scale"` - upgrade
+and rollback both (FIXES.md, section 25).
 
 What the chart covers is the application: the 8 services, the 6 datastores,
 RabbitMQ and the ingress. Network policies, autoscalers, logging, tracing,
@@ -284,27 +290,34 @@ Three limits are worth knowing before choosing this path:
   second time, so a change lands in both or it is a bug. On top of `helm lint` and
   `kubeconform` - which only prove that each side is valid on its own - CI compares
   the two (`deploy/kubernetes/helm-chart/check-parity.py`: replicas, every
-  container's name and ports, and the image, `command`, `args`, `env` and resources
-  for all 14 workloads; every Service's type, labels, ports and annotations; the
-  Ingress; and which objects each side renders at all). Three image differences are
-  allowlisted there, because neither side is obviously right: `mongo` vs
-  `mongo:4.4.0` for the two Mongo datastores and `user-db:0.3.0` vs `0.4.0`.
+  container's name, ports, image, `command`, `args`, `env`, `resources` and
+  `volumeMounts`, every pod volume's full source, for all 14 workloads; every
+  Service's type, labels, ports and annotations; the Ingress; and which objects each
+  side renders at all). No image difference is allowlisted: both sides ship
+  `mongo:4.4.0`, `user-db:0.4.0` and `rabbitmq:3.13.7-management` (`FIXES.md` §25).
 - Install into a **fresh** cluster. `helm` refuses to adopt objects that an earlier
   `kubectl apply` created (`invalid ownership metadata`), so switching paths on a
   live stand means `.\deploy.ps1 -Down` first.
-- The chart keeps the upstream probe timings (readiness of `carts` and `shipping`
-  starts at 360 s), so `--wait` needs about six minutes. The raw manifests probe
-  the four services that expose `/health` and rely on `availableReplicas` for the
-  rest, which is why the manifest path reports Ready sooner.
+- The chart carries container probes (readiness of `carts` and `shipping` starts at
+  360 s), so `--wait` needs about six minutes on a quiet install and about fifteen
+  when the HPAs add replicas mid-roll-out (`deploy.ps1` passes `--timeout 15m`). The
+  probe timings are deliberately looser than upstream's - `periodSeconds: 10`,
+  `timeoutSeconds: 5`, `failureThreshold: 6` - because the upstream set (`3` / `1` /
+  `3`) restarted healthy JVMs under the load generator; the four services the raw
+  manifests probe (`catalogue`, `front-end`, `payment`, `user`) carry the same
+  timings. The other four JVM services rely on `availableReplicas` there, which is
+  why the manifest path reports Ready sooner (`FIXES.md` §25).
 
 Both paths ask for the same **1.7 GiB** of memory in total. That equality is
 checked, not assumed: the chart used to request `2000Mi` on each of the four JVM
 services - 10 GiB of requests on a stand that has 8 GB - while every CI run stayed
 green, because "the chart renders" and "the chart describes the same pod" are two
-different claims (`FIXES.md` §23). That gate covers replicas, resources and image;
-pod behaviour (`env`, ports, probes) still differs between the two, and §23 lists the
-seven rows that have to be reconciled on a cluster before `-Helm` can be called
-equivalent rather than a demonstration that the application packages as a chart.
+different claims (`FIXES.md` §23). That gate now covers replicas, resources, image,
+`command`/`args`/`env`, ports, `volumeMounts` and volumes; what still differs is
+deliberate and named (probes exist on four manifest services and eight chart ones,
+`nodeSelector`), and §23 lists the rows that had to be reconciled on a cluster before
+`-Helm` could be called equivalent rather than a demonstration that the application
+packages as a chart.
 
 ## Accessing the application and tools
 
@@ -406,7 +419,7 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 │       ├── manifests-jaeger/               # Jaeger all-in-one (traces)
 │       ├── manifests-monitoring/           # Prometheus, Grafana, exporters
 │       ├── manifests-alerting/             # Alertmanager (Telegram + Slack)
-│       ├── manifests-loadtest/             # optional locust load generator
+│       ├── manifests-loadtest/             # optional k6 load generator
 │       ├── manifests-policy/               # NetworkPolicy: default-deny + per-service allows
 │       ├── manifests-aiops/                # AIOps triage bot (M1): ConfigMap, Deployment, Service, NetworkPolicy
 │       ├── autoscaling/                    # HPA v2 for the stateless services (+ legacy/)

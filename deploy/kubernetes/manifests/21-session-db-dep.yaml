@@ -33,5 +33,23 @@ spec:
               - SETGID
               - SETUID
           readOnlyRootFilesystem: true
+        # Redis keeps its working directory in /data (`CONFIG GET dir`) and that
+        # is where it writes its RDB snapshot. The mongo images on this stand get
+        # such a directory for free: their `VOLUME /data/db` turns into an
+        # anonymous writable mount (`/proc/mounts` of carts-db shows
+        # `/dev/sdd /data/db ext4 rw`). The redis image declares no volume, so
+        # with `readOnlyRootFilesystem: true` the first `BGSAVE` logged
+        # "Failed opening the temp RDB file ... Read-only file system", redis set
+        # `stop-writes-on-bgsave-error` and then answered EVERY write with
+        # `MISCONF`. Nobody could log in (the session store is Redis), so no order
+        # was ever placed - while the stand still looked Ready (see FIXES.md, 25).
+        # An emptyDir, not a PVC: on a stand whose data is disposable by design a
+        # session DB that survives a pod restart would be the only stateful thing.
+        volumeMounts:
+        - mountPath: /data
+          name: data-volume
+      volumes:
+        - name: data-volume
+          emptyDir: {}
       nodeSelector:
         kubernetes.io/os: linux

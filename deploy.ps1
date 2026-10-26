@@ -47,7 +47,7 @@
 param(
     [switch]$Down,
     [string]$TfDir,
-    # Optional: also deploy the locust load generator (manifests-loadtest).
+    # Optional: also deploy the k6 load generator (manifests-loadtest).
     # Without traffic the dashboards stay empty and the alert rules have
     # nothing to fire on, so this is what makes the stand "alive" for a demo.
     [switch]$WithLoadtest,
@@ -296,10 +296,26 @@ if ($Helm) {
     $chart = Join-Path $PSScriptRoot "deploy\kubernetes\helm-chart"
     # --wait because the rest of the script assumes a working application, and the
     # timeout is generous because the chart keeps the upstream probe timings
-    # (readiness of carts and shipping starts at 360 s). --atomic rolls the
-    # release back instead of leaving half an application behind on failure.
+    # (readiness of carts and shipping starts at 360 s). --rollback-on-failure rolls
+    # the release back instead of leaving half an application behind on failure -
+    # the same thing `--atomic` does, minus the deprecation warning Helm 4 prints
+    # for the old name.
+    #
+    # 15m, not 10m: a first install takes about six minutes (FIXES.md, section 24),
+    # but an upgrade of a stand that is already serving traffic takes about fifteen,
+    # because every replica the HPAs add mid-roll-out waits its own 360 s of
+    # initialDelaySeconds before it counts as available (section 25).
+    #
+    # --server-side=true --force-conflicts because the HPAs own `spec.replicas`.
+    # Helm 4 applies server-side by default, so the second run of `-Helm` on a stand
+    # that has been under load failed with `conflict with "k3s" with subresource
+    # "scale"` on the deployments the autoscalers had resized - and the rollback
+    # failed with the same conflict, leaving the release neither upgraded nor
+    # rolled back (FIXES.md, section 25). Forcing the conflict resolves it in the
+    # deploy's favour; the HPA re-scales from the next sample on.
     helm upgrade --install sock-shop $chart --namespace sock-shop --create-namespace `
-        --atomic --wait --timeout 10m
+        --server-side=true --force-conflicts `
+        --rollback-on-failure --wait --timeout 15m
     if ($LASTEXITCODE -ne 0) { throw "helm upgrade --install sock-shop failed (exit $LASTEXITCODE)" }
 } else {
     Write-Host "==> 2/8 Application (sock-shop)" -ForegroundColor Cyan
@@ -489,7 +505,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "    Rules reloaded (no restart: metric history kept)." -ForegroundColor Green
 
 # --- 7. Load generator (optional) -------------------------------------------
-# Deliberately optional: two locust pods hammering front-end are noise in a
+# Deliberately optional: two k6 pods hammering front-end are noise in a
 # training cluster, but they are exactly what makes the dashboards, the alert
 # rules and the traces non-empty (see manifests-loadtest/loadtest-dep.yaml).
 if ($WithLoadtest) {
@@ -577,7 +593,7 @@ if ($WithAIOps) {
 Write-Host ""
 Write-Host "Done. URLs:" -ForegroundColor Green
 Write-Host ("  Sock Shop   {0}" -f $appUrl)
-if ($WithLoadtest) { Write-Host "  Load test   2 locust pods hammering front-end (namespace loadtest)" }
+if ($WithLoadtest) { Write-Host "  Load test   2 k6 pods hammering front-end (namespace loadtest)" }
 if ($WithAIOps) {
     Write-Host  "  Triage bot  ClusterIP only (deliberate): kubectl -n monitoring port-forward svc/triage-bot 8081:8080"
     Write-Host  "              http://localhost:8081/healthz | /metrics | /incidents?limit=3"

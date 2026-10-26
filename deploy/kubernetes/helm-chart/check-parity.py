@@ -31,6 +31,12 @@ What is compared, per workload:
     ignored) - this is where `-decline=200`, `-mongo-host=...<namespace>...` and
     the `PermSize` flags lived, all invisible to every other check in CI
   * the first container's `resources` (requests and limits, as whole dicts)
+  * every container's `volumeMounts` (`mountPath` + volume name) and the pod's
+    `volumes` (name + the whole volume source, so `emptyDir` and
+    `emptyDir: {medium: Memory}` are different pods). This is the field that
+    section 25 needed: the `session-db` fix *is* a mount, and until this was
+    compared the gate would happily have accepted the fix in one file and not the
+    other - the same shape of blindness that let the read-only Redis live on.
 
 Beyond the workloads, the objects that carry the app's network contract:
 
@@ -56,6 +62,11 @@ to change):
   * `nodeSelector` - every manifests/ pod pins `kubernetes.io/os: linux`, no chart
     template does. On a one-OS cluster the field is inert, so it is documented
     rather than copied into 14 templates.
+  * the load generator - it is not an object of the application at all: a test
+    harness in its own `loadtest` namespace, applied by `deploy.ps1 -WithLoadtest`
+    on both paths (`manifests-loadtest/loadtest-dep.yaml`). The chart used to render
+    a second copy behind `loadtest.enabled: false` that mounted no ConfigMap, so it
+    could not have worked; it was removed rather than kept in sync.
 
 Exit code is 1 on any mismatch, 0 when the two sides agree.
 """
@@ -68,27 +79,18 @@ except ImportError:  # pragma: no cover - the workflow installs it explicitly
     sys.exit("check-parity: PyYAML is required (python3 -m pip install pyyaml)")
 
 
-# Workloads the plain path deploys from a different directory, so they legitimately
-# differ: `manifests-loadtest/loadtest-dep.yaml` (2 replicas, applied as its own
-# step) and the chart's copy, which is off by default (`loadtest.enabled: false`).
-SKIP = {"load-test"}
-
-# Image differences that are known and deliberately not resolved yet, keyed by
-# workload name: (what manifests/ ship, what the chart ships). Both sides run, they
-# just run different images; deciding which one is right needs a full `-Helm` run on
-# a fresh cluster, which has not been done. Everything NOT listed here is a hard
-# failure, so the drift cannot grow.
-KNOWN_IMAGE_DIFFS = {
-    # manifests/ say `mongo` (untagged = whatever `latest` resolves to; right now
-    # that is a floating tag on the live stand), the chart pins 4.4.0. Aligning the
-    # chart would put `latest` into a chart; aligning the manifests would restart a
-    # working carts-db on a different MongoDB major.
-    "carts-db": ("mongo", "mongo:4.4.0"),
-    "orders-db": ("mongo", "mongo:4.4.0"),
-    # The user database schema version, not just a patch: 0.3.0 is what the `user`
-    # service has been tested against here.
-    "user-db": ("weaveworksdemos/user-db:0.3.0", "weaveworksdemos/user-db:0.4.0"),
-}
+# Image differences that are known and deliberately not resolved, keyed by
+# workload name: (what manifests/ ship, what the chart ships). Empty on purpose:
+# the three entries that used to live here (`carts-db` and `orders-db` on untagged
+# `mongo` vs `mongo:4.4.0`, `user-db` on 0.3.0 vs 0.4.0) were all closed by pointing
+# the manifests at the version the chart deploys. That direction was chosen because
+# the chart is what actually ran: the first `-Helm` run stored a cart item and an
+# order in `mongo:4.4.0` and registered a customer against `user-db:0.4.0`, so the
+# pinned side is the proven side, while the manifests' side had never been exercised
+# on this stand. The dict stays so that a future difference has an explicit,
+# reviewable place to live instead of being tolerated silently - anything NOT listed
+# here is a hard failure.
+KNOWN_IMAGE_DIFFS = {}
 
 WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 
@@ -118,7 +120,7 @@ def summarise(docs):
     out = {}
     for doc in docs:
         kind = doc.get("kind")
-        if kind not in WORKLOAD_KINDS or doc["metadata"]["name"] in SKIP:
+        if kind not in WORKLOAD_KINDS:
             continue
         spec = doc["spec"]
         containers = spec["template"]["spec"]["containers"]
@@ -155,6 +157,24 @@ def summarise(docs):
                 )
             ),
             first.get("resources") or {},
+            # Mounts, per container, and the volumes behind them. A pod that mounts
+            # a writable directory where the other side does not is a different pod
+            # with a different runtime behaviour - `session-db` with a read-only
+            # root filesystem and no `/data` mount answered every write with
+            # `MISCONF` while both sides "agreed" on image, ports, env and limits.
+            tuple(
+                sorted(
+                    (container.get("name"), mount.get("mountPath"), mount.get("name"))
+                    for container in containers
+                    for mount in (container.get("volumeMounts") or [])
+                )
+            ),
+            tuple(
+                sorted(
+                    (volume.get("name"), yaml.safe_dump(volume, sort_keys=True))
+                    for volume in (spec["template"]["spec"].get("volumes") or [])
+                )
+            ),
         )
     return out
 
@@ -274,6 +294,8 @@ def main(argv):
             exp_args,
             exp_env,
             exp_res,
+            exp_mounts,
+            exp_volumes,
         ) = expected[key]
         (
             act_replicas,
@@ -283,6 +305,8 @@ def main(argv):
             act_args,
             act_env,
             act_res,
+            act_mounts,
+            act_volumes,
         ) = actual[key]
 
         if exp_replicas != act_replicas:
@@ -324,6 +348,22 @@ def main(argv):
                 f"{key[0]}/{name}: resources differ\n"
                 f"    manifests/: {exp_res}\n"
                 f"    chart     : {act_res}"
+            )
+
+        if exp_mounts != act_mounts:
+            problems.append(
+                f"{key[0]}/{name}: volumeMounts differ (container, mountPath, volume)\n"
+                f"    manifests/: {list(exp_mounts)}\n"
+                f"    chart     : {list(act_mounts)}"
+            )
+
+        if exp_volumes != act_volumes:
+            problems.append(
+                f"{key[0]}/{name}: volumes differ (name, source)\n"
+                f"    manifests/: {[n for n, _ in exp_volumes]}\n"
+                f"    chart     : {[n for n, _ in act_volumes]}\n"
+                f"    manifests/ sources:\n{chr(10).join(source for _, source in exp_volumes)}\n"
+                f"    chart sources:\n{chr(10).join(source for _, source in act_volumes)}"
             )
 
         if exp_image != act_image:
@@ -407,8 +447,9 @@ def main(argv):
     print(
         f"chart and manifests/ agree on {compared} workload(s), {compared_svc} "
         f"Service(s) and {compared_ing} Ingress(es) - workloads: replicas, containers "
-        f"(name + ports), image, command, args, env, resources; Services: type, "
-        f"labels, ports, annotations; Ingress: class, labels, annotations, rules "
+        f"(name + ports), image, command, args, env, resources, volumeMounts, "
+        f"volumes; Services: type, labels, ports, annotations; Ingress: class, "
+        f"labels, annotations, rules "
         f"({allowlisted} allowlisted image difference(s), "
         f"{len(ONLY_IN_MANIFESTS_OK)} object(s) only the plain path creates)"
     )

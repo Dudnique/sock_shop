@@ -18,7 +18,11 @@ spec:
     spec:
       containers:
       - name: user-db
-        image: weaveworksdemos/user-db:0.3.0
+        # 0.4.0, the version the chart deploys: the `-Helm` run registered and
+        # logged in a customer against it (`weaveworksdemos/user:0.4.7` + this
+        # image), so the pair is proven. 0.3.0 was never exercised on this stand -
+        # it was only ever the number in the manifests.
+        image: weaveworksdemos/user-db:0.4.0
 
         ports:
         - name: mongo

@@ -36,17 +36,24 @@ spec:
             drop:
               - all
           readOnlyRootFilesystem: true
+        # Liveness must not kill a healthy pod: upstream's 3 s period with a 1 s
+        # timeout and 3 failures restarted four services under the load generator, as
+        # one slow /health is enough three times in a row (FIXES.md, section 25).
         livenessProbe:
           httpGet:
             path: /
             port: 8079
           initialDelaySeconds: 300
-          periodSeconds: 3
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
         readinessProbe:
           httpGet:
             path: /
             port: 8079
           initialDelaySeconds: 30
-          periodSeconds: 3
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
       nodeSelector:
         kubernetes.io/os: linux

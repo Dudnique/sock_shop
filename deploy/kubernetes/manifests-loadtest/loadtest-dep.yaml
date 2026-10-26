@@ -4,6 +4,159 @@ kind: Namespace
 metadata:
   name: loadtest
 ---
+# The generator's traffic script. It is a ConfigMap, not part of the image, because
+# the image is now stock `grafana/k6` (see the container comment below).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: load-test-script
+  namespace: loadtest
+data:
+  load.js: |
+    // k6 traffic for sock-shop: browse the catalogue, then place a real order.
+    //
+    // This replaces weaveworksdemos/load-test:0.1.1 - locust 0.x on Python 2 - which
+    // dies with `Segmentation fault` on this kernel before it sends a single request,
+    // so `deploy.ps1 -WithLoadtest` produced zero orders. The flow is the one the
+    // original locustfile (microservices-demo/load-test/locustfile.py) used -
+    // catalogue, category page, detail page, cart, basket - with the checkout made
+    // explicit: that file relied on a pre-existing customer and an empty POST /orders,
+    // while this script registers its own customer once per VU and then repeats the
+    // order, so `data.customerOrder` in orders-db grows.
+    //
+    // The chart ships no copy of this file on purpose. The load generator is a test
+    // harness in its own `loadtest` namespace, applied by `deploy.ps1 -WithLoadtest`
+    // on both the plain and the Helm path. The chart used to carry a second copy behind
+    // `loadtest.enabled: false` which mounted no ConfigMap at all - dead and broken.
+
+    import http from 'k6/http';
+    import encoding from 'k6/encoding';
+    import { check, sleep } from 'k6';
+
+    const BASE = __ENV.BASE_URL || 'http://front-end.sock-shop.svc.cluster.local';
+    const PASSWORD = 'loadtest123';
+    const JSON_HEADERS = { headers: { 'Content-Type': 'application/json' } };
+
+    export const options = {
+      vus: Number(__ENV.VUS || 5),
+      iterations: Number(__ENV.ITERATIONS || 100),
+      // k6 drops the cookie jar between iterations by default: every iteration is
+      // a brand-new browser. This script is the opposite - a customer registered
+      // in the VU's first iteration keeps shopping for the rest of them - so
+      // without this flag `prepare()` is undone by k6 and every order after the
+      // first one is answered with 500 `{"message":"User not logged in."}`, because
+      // the front-end's POST /orders insists on the `logged_in` cookie that the
+      // registration set (`api/orders/index.js`). Measured: cookies=[] at the start
+      // of iteration 1, 5 order checks out of 100 passed, one per VU.
+      noCookiesReset: true,
+      thresholds: {
+        // A run whose orders fail is a failed run, not a slow one. Without this the
+        // wrapper loop (`while true; do k6 run ...; done`) would keep restarting a
+        // generator that produces nothing and the failure would look like success.
+        checks: ['rate>0.95'],
+      },
+    };
+
+    // One customer per VU, created on that VU's first iteration. k6 gives every VU
+    // its own JS runtime, so this is per-VU state, not shared between VUs.
+    let customer = null;
+
+    function prepare() {
+      const username = `load-${Date.now()}-${__VU}`;
+      http.post(
+        `${BASE}/register`,
+        JSON.stringify({
+          username: username,
+          password: PASSWORD,
+          email: `${username}@example.com`,
+          firstName: 'Load',
+          lastName: 'Test',
+        }),
+        JSON_HEADERS
+      );
+      // The front-end's GET /login does not read query parameters: it forwards the
+      // request's Authorization header to the user service (`api/user/index.js`,
+      // "uri: endpoints.loginUrl"). `GET /login?username=..&password=..` therefore
+      // always answers 401 - measured on this stand - and the session's customerId
+      // stays unset. Basic auth is the contract the image actually implements.
+      const login = http.get(`${BASE}/login`, {
+        headers: { Authorization: 'Basic ' + encoding.b64encode(`${username}:${PASSWORD}`) },
+      });
+      check(login, { 'logged in': (r) => r.status === 200 });
+      // An order needs somewhere to ship to and something to pay with. Both are
+      // posted once per customer, which is what a browser does before checkout.
+      http.post(
+        `${BASE}/addresses`,
+        JSON.stringify({
+          number: '42',
+          street: 'High Street',
+          city: 'London',
+          postcode: 'SW1A 1AA',
+          country: 'United Kingdom',
+        }),
+        JSON_HEADERS
+      );
+      http.post(
+        `${BASE}/cards`,
+        JSON.stringify({ longNum: '4111111111111111', expires: '12/30', ccv: '123' }),
+        JSON_HEADERS
+      );
+      return username;
+    }
+
+    export default function () {
+      if (customer === null) {
+        customer = prepare();
+      }
+
+      check(http.get(`${BASE}/`), { 'home 200': (r) => r.status === 200 });
+
+      const catalogue = http.get(`${BASE}/catalogue`);
+      let items = [];
+      try {
+        items = catalogue.json();
+      } catch (e) {
+        items = [];
+      }
+      check(catalogue, {
+        'catalogue 200': (r) => r.status === 200,
+        'catalogue non-empty': () => Array.isArray(items) && items.length > 0,
+      });
+      if (!Array.isArray(items) || items.length === 0) {
+        return;
+      }
+      // Cheap items only. The payment binary in the manifests runs without
+      // `-decline`, so its own default refuses anything above 100.00 ("Payment
+      // declined: amount exceeds 100.00" in the orders log), and `DELETE /cart`
+      // answers 202 before the item is really gone, so a random 99.99 item plus a
+      // leftover from the previous iteration crosses the limit. Measured before the
+      // filter: 340 x 201 against 47 x 406 - the generator was measuring the payment
+      // policy, not the shop. Every item here costs less than 40, so even a doubled
+      // basket is authorised.
+      const affordable = items.filter((i) => typeof i.price === 'number' && i.price <= 40);
+      const pool = affordable.length > 0 ? affordable : items;
+      const item = pool[Math.floor(Math.random() * pool.length)];
+
+      http.get(`${BASE}/category.html`);
+      http.get(`${BASE}/detail.html?id=${item.id}`);
+      http.del(`${BASE}/cart`); // whatever the previous iteration left in the cart
+      check(
+        http.post(`${BASE}/cart`, JSON.stringify({ id: item.id, quantity: 1 }), JSON_HEADERS),
+        { 'cart accepts item': (r) => r.status === 200 || r.status === 201 }
+      );
+      http.get(`${BASE}/basket.html`);
+      check(http.post(`${BASE}/orders`), { 'order created': (r) => r.status === 201 });
+
+      // Think time, the one thing the original locustfile had and this script
+      // first did not: without it the loop is not "a user", it is a hammer with no
+      // gaps, and on this stand it OOM-killed `carts` (exit 137, 500Mi limit) within
+      // two minutes - so every iteration after that failed with `EOF`, and the run
+      // reported the generator's own impatience as an application bug. One second
+      // per iteration keeps 5 VUs at a few requests per second, which is what the
+      // dashboards, the HPAs and the alert rules are sized for.
+      sleep(1);
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,8 +176,27 @@ spec:
     spec:
       containers:
       - name: load-test
-        image: weaveworksdemos/load-test:0.1.1
-        command: ["/bin/sh"]
-        args: ["-c", "while true; do locust --host http://front-end.sock-shop.svc.cluster.local -f /config/locustfile.py --clients 5 --hatch-rate 5 --num-request 100 --no-web; done"]
+        # k6, not locust: weaveworksdemos/load-test:0.1.1 is locust 0.x on Python 2
+        # and segfaults on this kernel before it sends a request, so `-WithLoadtest`
+        # used to create zero orders. `0.54.0` is pinned like every other image
+        # here: a load generator that silently changes version changes the numbers
+        # it produces.
+        image: grafana/k6:0.54.0
+        command: ["/bin/sh", "-c"]
+        # k6 exits non-zero when its thresholds fail, and the loop restarts it after
+        # a pause instead of leaving a dead pod behind: the generator is meant to keep
+        # running for the whole demo (dashboards, alerts and traces need its traffic).
+        args: ["while true; do k6 run --quiet /config/load.js; sleep 5; done"]
+        env:
+        - name: BASE_URL
+          value: http://front-end.sock-shop.svc.cluster.local
+        volumeMounts:
+        - name: script
+          mountPath: /config
+          readOnly: true
+      volumes:
+      - name: script
+        configMap:
+          name: load-test-script
       nodeSelector:
         kubernetes.io/os: linux

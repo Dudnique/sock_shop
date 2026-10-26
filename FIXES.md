@@ -1414,7 +1414,7 @@ a different pod than the manifests', reporting spans to nothing.
 
 | Field | Why it stays out |
 | ----- | ---------------- |
-| probes | The manifests rely on `availableReplicas`, the chart on container probes with upstream timings - an intentional difference, documented in the README. A gate that compared them would be permanently red, and an always-red gate is a gate nobody reads |
+| probes | The manifests rely on `availableReplicas` for four of the eight JVM services and probe the other four, the chart probes all eight - an intentional difference, documented in the README. A gate that compared them would be permanently red, and an always-red gate is a gate nobody reads. The timings are no longer upstream's: section 25 lowered them on both sides after they restarted healthy pods |
 | `nodeSelector` | All 14 `manifests/` pods pin `kubernetes.io/os: linux`; no chart template does. On a one-OS cluster the field changes nothing, so it is written down here instead of copied into 14 templates |
 
 **The limitation worth knowing.** The chart path has still never been installed
@@ -1440,7 +1440,8 @@ the same pod spec", not "the chart path serves traffic". Everything below was me
 
 **Timings, because they decide whether the path is usable.** `terraform destroy`:
 11 s for the cluster plus the kubeconfig. `terraform apply`: 30 s to a three-node k3d
-cluster. `helm upgrade --install ... --wait --timeout 10m`: about six minutes, and it is
+cluster. `helm upgrade --install ... --wait --timeout 10m` (the script passes `--timeout 15m`
+since section 25): about six minutes, and it is
 the chart's own probe timings that set that number (`carts` and `shipping` have
 `initialDelaySeconds: 360`). The remaining six steps of `deploy.ps1` (policies, logging,
 tracing, monitoring, alerting) took another two. End state: 14/14 chart pods `Running`
@@ -1516,7 +1517,7 @@ so), so the manifest path would report exactly the same zero.
 | ------- | -------- | ------------- |
 | `deploy.ps1` printed a literal `{0}` | `restart policy -> no on {0} k3d container(s)` | `-f` binds to the last operand of `+`, so the format string was `deploy\stand.ps1 -Start`. Parenthesised the concatenation |
 | the load generator is dead on a modern kernel | `weaveworksdemos/load-test:0.1.1` (Python 2) logs `Segmentation fault (core dumped)` in a loop; `customerOrder` stayed 0 for the 2.5 minutes it ran | Nothing yet - the loadtest manifests are a separate step; the checkout above was driven by hand instead. It needs a rebuilt image, and that is a TODO |
-| "no endpoints" looks like `ECONNREFUSED`, not like a timeout | A probe pod that was labelled `name: orders` (to pass the policies) became a **second endpoint of the `orders` Service**; having no listener on 80, it produced `ECONNREFUSED` for every request that landed on it | Deleted the pod. The episode is worth keeping because it explains the class of failure the chart's probes can cause: `periodSeconds: 3`, `timeoutSeconds: 1`, `failureThreshold: 3` means three missed one-second probes remove a JVM from the endpoints, and a client then sees a connection refused, not a slow response. The manifests have no container probes at all, so this failure mode exists only on the chart path |
+| "no endpoints" looks like `ECONNREFUSED`, not like a timeout | A probe pod that was labelled `name: orders` (to pass the policies) became a **second endpoint of the `orders` Service**; having no listener on 80, it produced `ECONNREFUSED` for every request that landed on it | Deleted the pod. The episode is worth keeping because it explains the class of failure the chart's probes can cause: `periodSeconds: 3`, `timeoutSeconds: 1`, `failureThreshold: 3` means three missed one-second probes remove a JVM from the endpoints, and a client then sees a connection refused, not a slow response. The manifests probe only four services (`catalogue`, `front-end`, `payment`, `user`), so the failure mode was rarer there - not absent, and section 25 had to fix those four as well |
 
 **What is left after this run.** The three allowlisted image differences
 (`mongo` vs `mongo:4.4.0` twice, `user-db` `0.3.0` vs `0.4.0`) are untouched: they need a
@@ -1531,7 +1532,158 @@ outside the release, so a chart reinstall does not disturb it. What a reinstall 
 destroy is application data: `orders-db` comes back empty, so `data.customerOrder` counts
 from zero again.
 
+## 25. The load test that had never placed an order: think time, cookies, credentials, and a Redis that could not save
 
+**Why this run had to happen.** Section 24 left three things open - RabbitMQ metrics, the
+load generator, and the three allowlisted image differences. The loadtest path was the one
+that mattered: `deploy.ps1 -WithLoadtest` exists to drive real orders through the stand, and
+its checks were red. They were red for four unrelated reasons, three of them in the
+generator and one in a datastore that could not write a single byte.
 
+**RabbitMQ: one version, and the exporter starts telling the truth.** `3.6.8-management` is
+from 2016; its management plugin dies in `rabbit_mgmt_stats:rate_from_difference/2`
+(`badarith`) and every `/api/*` the exporter calls answers 500. Both paths now ship
+`rabbitmq:3.13.7-management` with `kbudde/rabbitmq-exporter:1.0.0`, and the series that were
+zero or absent are real:
 
+| Query | Section 24 | Now |
+| ----- | ---------- | --- |
+| `rabbitmq_up` | `0`, continuously, for 40 minutes | `1` |
+| `rabbitmq_queues` | did not exist | `1` |
+| `rabbitmq_connections` | did not exist | `2` |
 
+AMQP never noticed either way: `queue-master` declares `shipping-task`, consumes it, and
+logs `Received shipment task` for every order (333 of them in the window measured below).
+
+**Think time, or the generator OOM-kills `carts`.** The first version of the k6 script had no
+pause between iterations - five VUs in a tight loop - and inside two minutes `carts` was
+`OOMKilled` (exit 137 against its 500Mi limit; `kube_pod_container_status_restarts_total`
+shows 3 for `carts` and 1 for `shipping`, all from that window). Every request after that
+failed with `EOF`, so the generator reported its own impatience as an application bug. With
+`sleep(1)` per iteration the same generator runs at 3.9-4.3 iterations/s with
+`iteration_duration` averaging 1.15 s, and `carts` sits at ~365 MiB per pod (729 MiB across
+its two HPA replicas) - under the limit, no restarts since.
+
+**`session-db` could not save, and nothing said so.** Redis keeps its working directory in
+`/data` and writes its RDB there; the front-end keeps every session in that Redis
+(`SESSION_REDIS=true`). Measured on the running pod:
+
+| Measurement | Value |
+| ----------- | ----- |
+| `redis-cli config get dir` / `save` | `/data` / `3600 1 300 100 60 10000` |
+| `session-db` log | `Failed opening the temp RDB file ... Read-only file system` |
+| `session-db` `/proc/mounts` | no mount on `/data` at all - the root filesystem is read-only |
+| `carts-db` `/proc/mounts` | `/dev/sdd /data/db ext4 rw,relatime` - the mongo image's `VOLUME` |
+| consequence | after the first failed save Redis sets `stop-writes-on-bgsave-error` and answers **every** write with `MISCONF` |
+
+The asymmetry is the point: the mongo images declare `VOLUME /data/db`, the runtime turns it
+into an anonymous writable mount, so the four mongo pods never noticed their read-only root.
+The redis image declares no volume, so `readOnlyRootFilesystem: true` left it with nowhere to
+write - and the stand stayed `Ready` while registration, login and checkout were silently
+impossible. Fixed with a plain `emptyDir` on `/data`, in `manifests/21-session-db-dep.yaml`
+*and* the chart template; verified with `bgsave` -> `Background saving started`,
+`rdb_last_bgsave_status:ok`, `SET` -> `OK`, `/dev/sdd /data ext4 rw`. An `emptyDir`, not a
+PV: on a stand whose data is disposable on purpose, a session store that survives a pod
+restart would be the only stateful thing on it.
+
+**The front-end hides its own errors, which cost an hour.** `helpers.sessionMiddleware` in
+the image is declared as `function(err, req, res, next)` - four arguments - so Express
+registers it as an *error handler*: it runs only after something else has failed, and then
+executes `if (!req.cookies.logged_in) res.session.customerId = null`. The read fails because
+the error skipped `cookie-parser`, and `res` is the response, not the request. Every failing
+POST therefore answers `500 {"message":"Cannot read property 'logged_in' of undefined"}` and
+the original error is gone. The lesson is cheap to state and was expensive to learn: **do not
+debug this front-end from its error bodies.** The probe that finally told the truth sent
+well-formed JSON and printed `register 200 -> login 200 -> address 200 -> card 200`,
+`cart 201`, `order 201`.
+
+**Three generator bugs behind those 500s.** Each was measured, not guessed:
+
+| Bug | Evidence | Fix |
+| --- | -------- | --- |
+| k6 empties the cookie jar between iterations | from inside the pod: `iter 0 before cookies=["logged_in","md.sid"]`, `iter 1 before cookies=[]`; 5 of 100 `order created` checks passed - one per VU, exactly the `prepare()` iteration | `noCookiesReset: true` |
+| `GET /login?username=..&password=..` is not the contract | `api/user/index.js` forwards the request's `Authorization` header to the user service; the query form answers `401` every time, `-u user:pass` answers `200` and sets the cookie | Basic auth built with `encoding.b64encode` |
+| a random catalogue item can cross the payment limit | `POST /orders`: 340 x `201` against 47 x `406`; orders log `Payment declined: amount exceeds 100.00` (the manifests pass no `-decline`, so the binary's own default of 100 runs) | pick items priced at most 40 |
+
+**End to end, measured.** Two generator pods, 5 VUs each, `iterations: 100` per run:
+
+| Metric | Value |
+| ------ | ----- |
+| k6 `checks` | **100.00%, 505 out of 505** |
+| `http_req_failed` | **0 of 820** |
+| throughput | 100 iterations per run at 3.9-4.3 iterations/s, `iteration_duration` p(95) ~1.3 s |
+| orders | `data.customerOrder` = 2657 documents; `POST /orders` answers `201` with a `customerId` |
+| shipment tasks | `queue-master`: 333 x `Received shipment task` |
+| restarts during the fix window | none |
+
+**`helm upgrade` on a live stand failed, and rolled back into the same failure.** Helm 4
+applies server-side by default, and the HPAs own `spec.replicas`:
+
+```
+Error: UPGRADE FAILED: an error occurred while rolling back the release. original upgrade
+error: conflict occurred while applying object sock-shop/carts apps/v1, Kind=Deployment:
+conflict with "k3s" with subresource "scale" using apps/v1: .spec.replicas
+```
+
+So the second `-Helm` run on a stand that has been under load neither upgraded nor rolled
+back. `deploy.ps1` now passes `--server-side=true --force-conflicts` (the deploy's replica
+count wins, and the HPA re-scales from the next sample) and `--rollback-on-failure` instead of
+`--atomic`, which Helm 4 warns about on every run. Re-run: `STATUS: deployed`,
+`REVISION: 5`, exit 0.
+
+**The gate learned the field it was missing.** `check-parity.py` compared replicas,
+containers, image, command/args/env and resources - and not one volume, so the fix above could
+have landed in one file and not the other with CI still green. It now compares every
+container's `volumeMounts` and every pod volume's full source as well. The render in this
+repository agrees on all 14 workloads, and a deliberately broken one (session-db without
+`/data`) fails with `Deployment/session-db: volumeMounts differ (...) chart: []`. The same run
+closed the image allowlist: both sides ship `mongo:4.4.0`, `user-db:0.4.0` and
+`rabbitmq:3.13.7-management`, so the report line reads **0 allowlisted image difference(s)**
+and `KNOWN_IMAGE_DIFFS` is empty - kept as the reviewable place for the next one.
+
+**Then the load test took the chart path down, and the probes were the cause.** The generator
+was green on a quiet stand; minutes into the same two pods (10 VUs) it turned red again -
+`checks` 32.78% and 45.37%, `catalogue 200` 0/100, `logged in` 0/5, `http_req_waiting` up to
+35 s - while the nodes sat at 26% memory and 3% CPU. The pods told the real story:
+`catalogue`, `payment`, `user`, `queue-master` and two of five `front-end` pods had restarted
+within three minutes of each other, and the events named the cause -
+`Container queue-master failed liveness probe, will be restarted`, `Liveness probe failed:
+... connect: connection refused` on the front-end, `payment` last state `Terminated /
+Completed / 0`. Every application template in the chart carried the upstream probes:
+`periodSeconds: 3` with the default `timeoutSeconds: 1` and `failureThreshold: 3`. Three
+consecutive `/health` answers slower than a second are enough, and a JVM serving ten virtual
+users produces exactly that. Section 24 had recorded this failure mode as a chart-path-only
+risk; here it fired, and it explains a red load test that looked like a broken catalogue.
+
+The timings are now `periodSeconds: 10`, `timeoutSeconds: 5`, `failureThreshold: 6` in all
+eight chart templates - a minute of consecutive failures before a restart. That still catches
+a hung service, and no longer kills a busy one. Both probes and both `initialDelaySeconds`
+stay where they were, so the chart keeps a startup gate the manifest path does not have, and
+the gate still ignores probes (TODO, section 3, says why).
+
+The raw manifests had to change as well, and the reason is worth stating: they **do** carry
+container probes - on four services, `catalogue`, `front-end`, `payment` and `user` - with the
+same upstream timings. Three of those four (`catalogue`, `payment`, `user`) were among the
+services that had just been restarted, and the fourth is the front-end that was killed twice,
+so on its next turn under load the manifest path would have failed the same way. They now
+carry the same `10 / 5 / 6`, and `complete-demo.yaml` was regenerated from `manifests/` (it is
+literally their concatenation, and CI diffs the two). `carts`, `orders`, `queue-master` and
+`shipping` stay probe-free on the manifest path - that difference remains, and it is one of
+the reasons the gate does not compare probes.
+
+Helm revision 6 rolled the eight deployments out and came back `deployed`; every pod then
+reported `0` restarts, and four consecutive k6 runs on the restored stand were `checks`
+100.00% (505/505), `http_req_failed` 0/820, `order created` passed - the same numbers as
+before the stand was destabilised.
+
+**One timeout had to move with them.** `deploy.ps1` passed `--timeout 10m` to
+`helm upgrade --wait`. That is generous for a quiet first install (six minutes, section 24)
+and not generous for an upgrade of a stand that is already serving traffic: the HPA added a
+second `carts` replica in the middle of revision 6, that replica waits its own 360 s of
+`initialDelaySeconds` before it counts as available, and the upgrade took about fifteen
+minutes. The script now passes `--timeout 15m`.
+
+**What is left.** Nothing on the loadtest path, and nothing on the probe front: the chart's
+probes are now tolerant enough for the generator to run clean, while the two fields section 23
+decided not to compare (probes, `nodeSelector`) still stand, and `rendered.yaml` stays a local
+artefact.

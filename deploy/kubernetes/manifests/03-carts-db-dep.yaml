@@ -18,7 +18,13 @@ spec:
     spec:
       containers:
       - name: carts-db
-        image: mongo
+        # Pinned, not floating: `mongo` with no tag is `latest`, which on this
+        # stand would pull a MongoDB several majors newer than 4.4 on the next
+        # image pull - and `mongo:latest` has removed the shell these images are
+        # debugged with. The chart pinned 4.4.0 all along; the first `-Helm` run
+        # proved that pin works with `weaveworksdemos/carts:0.4.8` (cart add and
+        # checkout both succeed on it), so the manifests now say the same thing.
+        image: mongo:4.4.0
         ports:
         - name: mongo
           containerPort: 27017

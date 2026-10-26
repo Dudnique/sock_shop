@@ -18,7 +18,10 @@ spec:
     spec:
       containers:
       - name: orders-db
-        image: mongo
+        # Pinned for the same reason as manifests/03-carts-db-dep.yaml: untagged
+        # `mongo` is `latest`, the chart pinned 4.4.0, and the `-Helm` run proved
+        # 4.4.0 stores orders correctly (`data.customerOrder` grows on checkout).
+        image: mongo:4.4.0
         ports:
         - name: mongo
           containerPort: 27017

@@ -32,3 +32,16 @@ spec:
           readOnlyRootFilesystem: true
         resources:
 {{ toYaml .Values.sessiondb.resources | indent 10 }}
+        # `/data` is redis' working directory and the place it writes its RDB
+        # snapshot; the root filesystem is read-only, and unlike the mongo images
+        # the redis image declares no `VOLUME` the runtime would turn into a
+        # writable mount. Without this, `BGSAVE` fails, `stop-writes-on-bgsave-error`
+        # makes every write `MISCONF`, sessions cannot be created and no order is
+        # placed - the manifests carry the same volume and the long version of the
+        # story (FIXES.md, 25).
+        volumeMounts:
+        - mountPath: /data
+          name: data-volume
+      volumes:
+        - name: data-volume
+          emptyDir: {}

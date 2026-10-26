@@ -20,7 +20,15 @@ spec:
     spec:
       containers:
       - name: rabbitmq
-        image: rabbitmq:3.6.8-management
+        # 3.13.7, not 3.6.8: that image is from 2016 and its management plugin is
+        # broken on this kernel - every /api/* call answers 500, with
+        # `rabbit_mgmt_stats:rate_from_difference/2` raising `badarith` in a loop
+        # (see FIXES.md section 24). AMQP itself kept working, so the only symptom
+        # was that the exporter below had nothing to read and rabbitmq_queues,
+        # rabbitmq_queue_messages_ready and rabbitmq_connections did not exist.
+        # 3.13.7 is the current 3.x line; the AMQP contract queue-master uses
+        # (one queue, one consumer) is unchanged by the upgrade.
+        image: rabbitmq:3.13.7-management
         ports:
         - containerPort: 15672
           name: management
@@ -37,7 +45,11 @@ spec:
               - DAC_OVERRIDE
           readOnlyRootFilesystem: true
       - name: rabbitmq-exporter
-        image: kbudde/rabbitmq-exporter
+        # Pinned, unlike before: `latest` was the only floating tag left on the
+        # stand, and a scraper that silently changes version changes the metric
+        # names the dashboard and the alert rules are written against. 1.0.0 is
+        # the current release of kbudde/rabbitmq-exporter.
+        image: kbudde/rabbitmq-exporter:1.0.0
         # The image listens on 9419 by default (PUBLISH_PORT=9419), while this
         # file, 20-rabbitmq-svc.yaml and the prometheus.io/port annotation all
         # announce 9090. That mismatch made every scrape of the rabbitmq Service

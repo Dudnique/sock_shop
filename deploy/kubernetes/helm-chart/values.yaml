@@ -89,20 +89,6 @@ frontend:
             cpu: 100m
             memory: 300Mi
 
-loadtest:
-    replicas: 2
-    enabled: false
-    image:
-        repo: weaveworksdemos/load-test
-        tag: 0.1.1
-    resources:
-        limits:
-            cpu: 300m
-            memory: 1000Mi
-        requests:
-            cpu: 100m
-            memory: 300Mi
-
 ordersdb:
     image:
         repo: mongo
@@ -169,15 +155,23 @@ rabbitmq:
         # behind the :15672 HTTP API and UI. manifests/19-rabbitmq-dep.yaml has
         # always run this tag, and the exporter below scrapes that API - with
         # the bare image there would be nothing to scrape.
+        #
+        # 3.13.7, not 3.6.8: the 2016 management plugin is broken on this kernel.
+        # Every /api/* call answers 500 (`badarith` in
+        # `rabbit_mgmt_stats:rate_from_difference/2`, see FIXES.md section 24),
+        # so `/api/overview` was dead while AMQP kept working - the queue was
+        # fine, only the statistics were not. The upgrade is the reason the
+        # rabbitmq_* panels and the queue depth alert can be trusted at all.
         repo: rabbitmq
-        tag: 3.6.8-management
+        tag: 3.13.7-management
     # The same sidecar as manifests/19-rabbitmq-dep.yaml: it reads the management
     # API on localhost:15672 and publishes Prometheus metrics on 9090, which is
-    # the port the Service annotation advertises. Left untagged exactly like the
-    # manifests - pinning one side only would be a difference the gate cannot see.
+    # the port the Service annotation advertises. Pinned to 1.0.0 on both sides:
+    # `latest` was the last floating tag on the stand, and a scraper that changes
+    # version changes metric names the dashboard and the alert rules depend on.
     exporter:
         repo: kbudde/rabbitmq-exporter
-        tag: latest
+        tag: 1.0.0
     resources: {}
 
 sessiondb:
