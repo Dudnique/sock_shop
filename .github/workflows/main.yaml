@@ -193,11 +193,15 @@ jobs:
   #      verified.
   #    - Finally the rendered chart is compared with manifests/ object by object
   #      (check-parity.py: replicas, every container's name and ports, resources,
-  #      image). "Both sides render and validate" is not the same as "both sides
-  #      describe the same pod", and that gap is how the chart drifted to 2000Mi
-  #      of memory requests per JVM service (~10 GiB in total, on an 8 GB stand)
-  #      with CI green throughout - and, more quietly, how its RabbitMQ lost the
-  #      Prometheus exporter sidecar without a single red run.
+  #      image, probes). "Both sides render and validate" is not the same as
+  #      "both sides describe the same pod", and that gap is how the chart drifted
+  #      to 2000Mi of memory requests per JVM service (~10 GiB in total, on an
+  #      8 GB stand) with CI green throughout - and, more quietly, how its
+  #      RabbitMQ lost the Prometheus exporter sidecar without a single red run.
+  #      The last field was added after a long run of green builds that said
+  #      nothing about it: four services had no readinessProbe at all on the
+  #      plain path, so half their traffic went to JVMs that were not listening
+  #      yet (FIXES.md, section 26).
   # ---------------------------------------------------------------------------
   helm-chart-validate:
     runs-on: ubuntu-latest

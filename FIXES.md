@@ -1781,6 +1781,17 @@ had just gone from idle to 10 VUs, not the defect this section is about - but it
 quoted above are the runs after the stand had settled, and why "first run is red, second is green"
 is not accepted as evidence anywhere in this file.
 
+**CI agrees, and it agrees on the field that was missing.** Run #37, the commit that added the four
+probes and the tenth compared field, was green in 24 s, and run #38 in 19 s; `helm-chart-validate` -
+the job that renders the chart and pipes it through `check-parity.py` - passed in 7 and 9 s
+respectively, and `complete-demo-sync-check`, the byte-diff of the regenerated `complete-demo.yaml`
+against 30 concatenated files, in 4 and 5 s. A gate is only worth its runtime if it goes red when it
+should, so the tenth field was broken on purpose once, locally: with `livenessProbe`/`readinessProbe`
+stripped from `Deployment/carts` and nothing else changed, `check-parity.py` exits 1 with
+`probes differ (container, livenessProbe/readinessProbe)`. That is the run this repository never had
+before section 26, and the reason the four plain-path services went out without probes in the first
+place.
+
 **What is left.** Nothing on probes: the two paths now describe the same pods, and the gate would
 say so if they stopped. The `nodeSelector` asymmetry section 23 lists stays as it was - inert on a
 one-OS cluster. And the diagnosis worth remembering is not "add a probe": it is that a green gate
