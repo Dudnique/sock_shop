@@ -107,6 +107,18 @@ class MockAdapter(Adapter):
             "escalate_human", 0.80,
             "Цель мониторинга недоступна: сначала надо понять, упала ли цель или "
             "сам скрейпинг."),
+        "RabbitMQDown": (
+            "escalate_human", 0.90,
+            "Брокер не отвечает: перезапуск брокера - это риск для очередей и "
+            "данных в полёте, решение должен принять человек."),
+        "RabbitMQQueueBacklog": (
+            "escalate_human", 0.75,
+            "Очередь растёт: причина может быть и в консьюмере, и в медленном "
+            "получателе, и в самом брокере - перезапуск наугад скроет симптом."),
+        "RabbitMQAlarm": (
+            "escalate_human", 0.95,
+            "Сработала защита брокера по памяти или диску: нужен человек, чтобы "
+            "освободить ресурс или осознанно изменить watermark."),
         # Deliberately below the 0.7 threshold: the cascade must open the model
         # tier on this one, and the unit tests assert that it does.
         "ProbeFailed": (

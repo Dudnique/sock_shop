@@ -114,6 +114,49 @@ data:
         annotations:
           summary: "pod/{{ $labels.pod }} restarted {{ $value }} times in 15m"
           description: "Restarts without CrashLoopBackOff usually mean an OOM kill or a failing liveness probe."
+      - alert: RabbitMQDown
+        # The broker's own health, not the scrape's: `ScrapeTargetDown` covers a
+        # dead exporter. The exporter is scraped by `kubernetes-service-endpoints`
+        # (measured label: `kubernetes_name="rabbitmq"`), so `rabbitmq_up` is the
+        # management API answering - which is what publish/consume depend on.
+        expr: rabbitmq_up{kubernetes_name="rabbitmq"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          namespace: sock-shop
+          aiops: "true"
+        annotations:
+          summary: "RabbitMQ broker is down"
+          description: "rabbitmq_up=0 for 2m: orders and shipping cannot publish, so checkout fails with a 500 while the rest of the shop still answers."
+          runbook: "kubectl -n sock-shop get pod -l name=rabbitmq; kubectl -n sock-shop logs -l name=rabbitmq --tail=100"
+      - alert: RabbitMQQueueBacklog
+        # Measured under the load test: `sum(rabbitmq_queue_messages_ready)` sits at
+        # 0 while queue-master keeps up, so a backlog means the consumer stopped.
+        # The threshold is small on purpose - this is a stand, not production.
+        expr: sum(rabbitmq_queue_messages_ready) > 100
+        for: 5m
+        labels:
+          severity: warning
+          namespace: sock-shop
+          aiops: "true"
+        annotations:
+          summary: "RabbitMQ queues are backing up ({{ $value }} ready messages)"
+          description: "Messages are published but not consumed for 5m. Check queue-master first: CrashLoopBackOff, or saturated and not keeping up."
+          runbook: "kubectl -n sock-shop logs -l name=queue-master --tail=100; kubectl -n sock-shop get pod -l name=queue-master"
+      - alert: RabbitMQAlarm
+        # A memory/disk alarm makes the broker refuse publishes while its HTTP API
+        # still answers - from the outside the shop just stops creating orders.
+        # `or` (not a scalar sum) because either alarm alone is enough.
+        expr: (rabbitmq_node_mem_alarm > 0) or (rabbitmq_node_disk_free_alarm > 0)
+        for: 1m
+        labels:
+          severity: critical
+          namespace: sock-shop
+          aiops: "true"
+        annotations:
+          summary: "RabbitMQ resource alarm is active"
+          description: "The broker is in a memory or disk alarm and blocks publishers. Free space/memory on the node or lower the watermark, then confirm `rabbitmqctl status`."
+          runbook: "kubectl -n sock-shop exec deploy/rabbitmq -- rabbitmqctl status; kubectl top node"
     - name: infrastructure
       rules:
       - alert: NodeNotReady
