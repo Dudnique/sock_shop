@@ -1683,6 +1683,11 @@ second `carts` replica in the middle of revision 6, that replica waits its own 3
 `initialDelaySeconds` before it counts as available, and the upgrade took about fifteen
 minutes. The script now passes `--timeout 15m`.
 
+**CI agreed.** The `ci` workflow on that commit (`f8fd4ec`, run #34) finished green in 19 s:
+`complete-demo-sync-check` found the regenerated `complete-demo.yaml` still equal to
+`manifests/`, and `helm chart validation` rendered the chart, ran `kubeconform` over it and
+compared the result with the manifests - 14 workloads, 14 Services, 1 Ingress, 0 differences.
+
 **What is left.** Nothing on the loadtest path, and nothing on the probe front: the chart's
 probes are now tolerant enough for the generator to run clean, while the two fields section 23
 decided not to compare (probes, `nodeSelector`) still stand, and `rendered.yaml` stays a local
