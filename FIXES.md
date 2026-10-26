@@ -1769,7 +1769,11 @@ as well.
 files, new pods Ready on the 360th second, `carts` down to a single endpoint while the second
 replica the HPA added sat at `0/1`), and the generator was applied again: `checks` **100.00%
 (505 of 505)**, `http_req_failed` **0 out of 820**, `cart accepts item` and `order created` both
-green, twice in a row on the same stand - the same numbers the Helm path produced in section 25.
+green, three runs in a row on the same stand - the same numbers the Helm path produced in
+section 25. The dashboards were checked on that stand as well (`grafana_check.py` through a
+port-forward): **91 queries, 0 empty**, RabbitMQ panels included, and the panels that had been blank
+before the generator ran were blank because `carts`, `orders` and `shipping` had no traffic - which
+is why Grafana is worth checking after a load run and not before it.
 The first run after applying the generator was 82.77%: its failures were `connection refused` to the
 **front-end** ClusterIP, from the moment the HPA was scaling the front-end back from five replicas to
 one after the quiet period, and the next run was clean. That is a scaling transient on a stand that
