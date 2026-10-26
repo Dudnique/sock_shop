@@ -298,26 +298,27 @@ Three limits are worth knowing before choosing this path:
 - Install into a **fresh** cluster. `helm` refuses to adopt objects that an earlier
   `kubectl apply` created (`invalid ownership metadata`), so switching paths on a
   live stand means `.\deploy.ps1 -Down` first.
-- The chart carries container probes (readiness of `carts` and `shipping` starts at
-  360 s), so `--wait` needs about six minutes on a quiet install and about fifteen
-  when the HPAs add replicas mid-roll-out (`deploy.ps1` passes `--timeout 15m`). The
-  probe timings are deliberately looser than upstream's - `periodSeconds: 10`,
-  `timeoutSeconds: 5`, `failureThreshold: 6` - because the upstream set (`3` / `1` /
-  `3`) restarted healthy JVMs under the load generator; the four services the raw
-  manifests probe (`catalogue`, `front-end`, `payment`, `user`) carry the same
-  timings. The other four JVM services rely on `availableReplicas` there, which is
-  why the manifest path reports Ready sooner (`FIXES.md` §25).
+- Both paths carry container probes on all eight application deployments (readiness
+  of `carts` and `shipping` starts at 360 s), so `--wait` needs about six minutes on
+  a quiet install and about fifteen when the HPAs add replicas mid-roll-out
+  (`deploy.ps1` passes `--timeout 15m`, and the plain path waits 900 s for
+  `condition=available`). The timings are deliberately looser than upstream's -
+  `periodSeconds: 10`, `timeoutSeconds: 5`, `failureThreshold: 6` - because the
+  upstream set (`3` / `1` / `3`) restarted healthy JVMs under the load generator.
+  The four manifest services that used to have no probes (`carts`, `orders`,
+  `queue-master`, `shipping`) carry the same set now: without them the pod joined
+  its Service while the JVM was still starting, and half the `POST /cart` requests
+  came back `500 connect ECONNREFUSED` to the `carts` ClusterIP (`FIXES.md` §26).
 
 Both paths ask for the same **1.7 GiB** of memory in total. That equality is
 checked, not assumed: the chart used to request `2000Mi` on each of the four JVM
 services - 10 GiB of requests on a stand that has 8 GB - while every CI run stayed
 green, because "the chart renders" and "the chart describes the same pod" are two
 different claims (`FIXES.md` §23). That gate now covers replicas, resources, image,
-`command`/`args`/`env`, ports, `volumeMounts` and volumes; what still differs is
-deliberate and named (probes exist on four manifest services and eight chart ones,
-`nodeSelector`), and §23 lists the rows that had to be reconciled on a cluster before
-`-Helm` could be called equivalent rather than a demonstration that the application
-packages as a chart.
+`command`/`args`/`env`, ports, `volumeMounts`, volumes and probes; what still
+differs is deliberate and named (`nodeSelector`), and §23 lists the rows that had
+to be reconciled on a cluster before `-Helm` could be called equivalent rather than
+a demonstration that the application packages as a chart.
 
 ## Accessing the application and tools
 

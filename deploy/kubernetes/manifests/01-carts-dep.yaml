@@ -43,6 +43,29 @@ spec:
         volumeMounts:
         - mountPath: /tmp
           name: tmp-volume
+        # Probes, with the chart's timings. Without a readinessProbe this pod joined
+        # the `carts` endpoints while the JVM was still starting, and the front-end's
+        # `POST /cart` reached port 80 before anything listened on it: the load
+        # generator measured 45-50% `cart accepts item` (500, `connect ECONNREFUSED
+        # 10.43.169.202:80`) on a fresh stand, and 30 of 30 success once the pod had
+        # warmed up. Liveness keeps the upstream period but a 6-failure threshold so
+        # one slow `/health` cannot restart a healthy pod (FIXES.md, section 25).
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 420
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 360
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
       volumes:
         - name: tmp-volume
           emptyDir:

@@ -48,6 +48,29 @@ spec:
         volumeMounts:
         - mountPath: /tmp
           name: tmp-volume
+        # Probes, with the chart's timings. Without a readinessProbe this pod joined
+        # the `carts` endpoints while the JVM was still starting, and the front-end's
+        # `POST /cart` reached port 80 before anything listened on it: the load
+        # generator measured 45-50% `cart accepts item` (500, `connect ECONNREFUSED
+        # 10.43.169.202:80`) on a fresh stand, and 30 of 30 success once the pod had
+        # warmed up. Liveness keeps the upstream period but a 6-failure threshold so
+        # one slow `/health` cannot restart a healthy pod (FIXES.md, section 25).
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 420
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 360
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
       volumes:
         - name: tmp-volume
           emptyDir:
@@ -388,6 +411,26 @@ spec:
         volumeMounts:
         - mountPath: /tmp
           name: tmp-volume
+        # Same reasoning as carts (FIXES.md, section 25 and the readiness note in
+        # manifests/01-carts-dep.yaml): a Spring Boot JVM that is in the endpoints
+        # before it listens answers with `ECONNREFUSED`, and `orders` is on the
+        # checkout path, so the failure surfaces as a 500 from the front-end.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 300
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
       volumes:
         - name: tmp-volume
           emptyDir:
@@ -586,6 +629,25 @@ spec:
             memory: 300Mi
         ports:
         - containerPort: 80
+        # Same reasoning as carts (manifests/01-carts-dep.yaml). queue-master itself
+        # is not on the request path, but the chart has always declared these probes
+        # and the two paths must describe the same pod.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 300
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
       nodeSelector:
         kubernetes.io/os: linux
 ---
@@ -816,6 +878,24 @@ spec:
         volumeMounts:
         - mountPath: /tmp
           name: tmp-volume
+        # Same reasoning as carts (manifests/01-carts-dep.yaml); `shipping` is called
+        # by `orders` during checkout, so an unready pod here is a failed order.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 420
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 360
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
       volumes:
         - name: tmp-volume
           emptyDir:

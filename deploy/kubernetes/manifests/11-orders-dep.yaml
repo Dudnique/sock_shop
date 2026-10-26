@@ -43,6 +43,26 @@ spec:
         volumeMounts:
         - mountPath: /tmp
           name: tmp-volume
+        # Same reasoning as carts (FIXES.md, section 25 and the readiness note in
+        # manifests/01-carts-dep.yaml): a Spring Boot JVM that is in the endpoints
+        # before it listens answers with `ECONNREFUSED`, and `orders` is on the
+        # checkout path, so the failure surfaces as a 500 from the front-end.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 300
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
       volumes:
         - name: tmp-volume
           emptyDir:

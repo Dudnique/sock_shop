@@ -37,6 +37,16 @@ What is compared, per workload:
     section 25 needed: the `session-db` fix *is* a mount, and until this was
     compared the gate would happily have accepted the fix in one file and not the
     other - the same shape of blindness that let the read-only Redis live on.
+  * every container's `livenessProbe` and `readinessProbe`, as written. Probes
+    used to be excluded here on the theory that the manifests "rely on
+    availableReplicas" - they do not, `availableReplicas` is Ready pods, and Ready
+    is exactly what a probe decides. The chart declared probes for carts, orders,
+    queue-master and shipping; the manifests declared none, so those four joined
+    their Services while the JVM was still starting. On a fresh plain-path stand
+    the load generator's `cart accepts item` check fell to 45% with
+    `connect ECONNREFUSED 10.43.169.202:80` from the front-end, and the same
+    requests passed 30 of 30 once the pods had warmed up. That asymmetry is what
+    this field now catches.
 
 Beyond the workloads, the objects that carry the app's network contract:
 
@@ -57,8 +67,6 @@ Deliberately not compared (each one is a documented decision in FIXES.md
 section 23, and a gate that compared them would be red for reasons nobody intends
 to change):
 
-  * probes - the manifests rely on `availableReplicas`, the chart on container
-    probes with upstream timings
   * `nodeSelector` - every manifests/ pod pins `kubernetes.io/os: linux`, no chart
     template does. On a one-OS cluster the field is inert, so it is documented
     rather than copied into 14 templates.
@@ -113,6 +121,25 @@ def load_rendered(path):
     if text is None:
         sys.exit(f"check-parity: cannot decode {path} as UTF-8 or UTF-16")
     return [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)]
+
+
+def probe_signature(container):
+    """`livenessProbe`/`readinessProbe` of one container, exactly as written.
+
+    These are not health decoration: they decide when a pod receives traffic. The
+    gate used to skip them ("the manifests rely on availableReplicas"), and that
+    is how the two paths came to differ where it hurts most - the chart declared
+    probes for carts, orders, queue-master and shipping, the manifests declared
+    none, so on a fresh plain-path stand those four pods joined their Services
+    while the JVM was still starting. The front-end answered `POST /cart` with
+    500 `connect ECONNREFUSED 10.43.169.202:80` for roughly half the requests
+    until the pods warmed up; the load generator's `checks` threshold caught it.
+    """
+    return tuple(
+        (name, yaml.safe_dump(container.get(name), sort_keys=True))
+        for name in ("livenessProbe", "readinessProbe")
+        if container.get(name)
+    )
 
 
 def summarise(docs):
@@ -173,6 +200,15 @@ def summarise(docs):
                 sorted(
                     (volume.get("name"), yaml.safe_dump(volume, sort_keys=True))
                     for volume in (spec["template"]["spec"].get("volumes") or [])
+                )
+            ),
+            # Probes, per container. Same argument as the mounts above: two pods
+            # that advertise health differently are two different pods to the
+            # Service, whatever the Deployment says.
+            tuple(
+                sorted(
+                    (container.get("name"), probe_signature(container))
+                    for container in containers
                 )
             ),
         )
@@ -296,6 +332,7 @@ def main(argv):
             exp_res,
             exp_mounts,
             exp_volumes,
+            exp_probes,
         ) = expected[key]
         (
             act_replicas,
@@ -307,6 +344,7 @@ def main(argv):
             act_res,
             act_mounts,
             act_volumes,
+            act_probes,
         ) = actual[key]
 
         if exp_replicas != act_replicas:
@@ -364,6 +402,14 @@ def main(argv):
                 f"    chart     : {[n for n, _ in act_volumes]}\n"
                 f"    manifests/ sources:\n{chr(10).join(source for _, source in exp_volumes)}\n"
                 f"    chart sources:\n{chr(10).join(source for _, source in act_volumes)}"
+            )
+
+        if exp_probes != act_probes:
+            problems.append(
+                f"{key[0]}/{name}: probes differ (container, livenessProbe/readinessProbe) - "
+                f"this is what decides when the pod receives traffic\n"
+                f"    manifests/: {list(exp_probes)}\n"
+                f"    chart     : {list(act_probes)}"
             )
 
         if exp_image != act_image:
@@ -448,7 +494,7 @@ def main(argv):
         f"chart and manifests/ agree on {compared} workload(s), {compared_svc} "
         f"Service(s) and {compared_ing} Ingress(es) - workloads: replicas, containers "
         f"(name + ports), image, command, args, env, resources, volumeMounts, "
-        f"volumes; Services: type, labels, ports, annotations; Ingress: class, "
+        f"volumes, probes; Services: type, labels, ports, annotations; Ingress: class, "
         f"labels, annotations, rules "
         f"({allowlisted} allowlisted image difference(s), "
         f"{len(ONLY_IN_MANIFESTS_OK)} object(s) only the plain path creates)"

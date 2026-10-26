@@ -45,6 +45,24 @@ spec:
         volumeMounts:
         - mountPath: /tmp
           name: tmp-volume
+        # Same reasoning as carts (manifests/01-carts-dep.yaml); `shipping` is called
+        # by `orders` during checkout, so an unready pod here is a failed order.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 420
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 360
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
       volumes:
         - name: tmp-volume
           emptyDir:

@@ -320,7 +320,14 @@ if ($Helm) {
 } else {
     Write-Host "==> 2/8 Application (sock-shop)" -ForegroundColor Cyan
     kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests")
-    kubectl wait --for=condition=available --timeout=300s deployment --all -n sock-shop
+    # 15m and not 300s for the same reason the Helm path passes --timeout 15m: the
+    # manifests now carry the chart's readinessProbe timings, and carts and shipping
+    # start their readiness checks at 360 s. 300 s was measured against a stand whose
+    # pods had no probes at all - a wait that only ever asked "is the container
+    # running", while the Service was already sending traffic to a JVM that was not
+    # listening yet (FIXES.md, section 26).
+    kubectl wait --for=condition=available --timeout=900s deployment --all -n sock-shop
+    if ($LASTEXITCODE -ne 0) { throw "deployments in sock-shop did not become available (exit $LASTEXITCODE)" }
 }
 
 # --- 3. Network policies ----------------------------------------------------

@@ -1414,7 +1414,7 @@ a different pod than the manifests', reporting spans to nothing.
 
 | Field | Why it stays out |
 | ----- | ---------------- |
-| probes | The manifests rely on `availableReplicas` for four of the eight JVM services and probe the other four, the chart probes all eight - an intentional difference, documented in the README. A gate that compared them would be permanently red, and an always-red gate is a gate nobody reads. The timings are no longer upstream's: section 25 lowered them on both sides after they restarted healthy pods |
+| probes | The manifests rely on `availableReplicas` for four of the eight JVM services and probe the other four, the chart probes all eight - an intentional difference, documented in the README. A gate that compared them would be permanently red, and an always-red gate is a gate nobody reads. The timings are no longer upstream's: section 25 lowered them on both sides after they restarted healthy pods. Section 26 reversed this row: the four manifest services that had none received the chart's probes, and the gate compares them now - the "always red" prediction was wrong, a red gate here would have been right |
 | `nodeSelector` | All 14 `manifests/` pods pin `kubernetes.io/os: linux`; no chart template does. On a one-OS cluster the field changes nothing, so it is written down here instead of copied into 14 templates |
 
 **The limitation worth knowing.** The chart path has still never been installed
@@ -1659,7 +1659,8 @@ The timings are now `periodSeconds: 10`, `timeoutSeconds: 5`, `failureThreshold:
 eight chart templates - a minute of consecutive failures before a restart. That still catches
 a hung service, and no longer kills a busy one. Both probes and both `initialDelaySeconds`
 stay where they were, so the chart keeps a startup gate the manifest path does not have, and
-the gate still ignores probes (TODO, section 3, says why).
+the gate still ignored probes (TODO, section 3, said why - section 26 shows that reason was
+the bug itself).
 
 The raw manifests had to change as well, and the reason is worth stating: they **do** carry
 container probes - on four services, `catalogue`, `front-end`, `payment` and `user` - with the
@@ -1692,3 +1693,93 @@ compared the result with the manifests - 14 workloads, 14 Services, 1 Ingress, 0
 probes are now tolerant enough for the generator to run clean, while the two fields section 23
 decided not to compare (probes, `nodeSelector`) still stand, and `rendered.yaml` stays a local
 artefact.
+
+## 26. The plain path that answered only half its carts: the probes the gate had agreed not to compare
+
+The acceptance run for the Terraform path was supposed to be bookkeeping. The stand came up from
+`deploy.ps1 -Down` and a fresh `deploy.ps1`: 40 pods, no failure events, 32 scrape targets up,
+`curl` answered 200 for the app, Grafana and Prometheus, and `check-parity.py` reported 14
+workloads, 14 Services, 1 Ingress and 0 differences. The load generator was the next step, and it
+turned the run into a finding: `checks` 75.24% (380 of 505), `http_req_failed` 21.70% (178 of 820),
+`cart accepts item` 45% (45 of 100) and `order created` 30% (30 of 100). Earlier runs on the same
+stand, minutes closer to the rollout, were worse: 86.53%, then 84.55%, then 75.24% - a stand that
+improves as it warms always means one thing, and it is never the test.
+
+The obvious suspects were cleared one by one. A hand-written iteration - register, `GET /login`
+with Basic auth, `POST /cart`, `POST /orders` - came back `register 200`, `login 200`,
+`cart POST 201` (the `orders` 406 is the payment service refusing a 99.99 item, the reason
+`loadtest-dep.yaml` filters to items under 40). Two sessions' worth of the same call answered 30 of
+30 `201`. So the application was not broken; **it was broken for part of the traffic**. Ten
+concurrent sessions, three iterations each, produced the decisive split: 14 `201` and 16 `500`, and
+every one of the 500s carried the same body from the front-end -
+
+    {"message":"connect ECONNREFUSED 10.43.169.202:80",
+     "error":{"code":"ECONNREFUSED","errno":"ECONNREFUSED","syscall":"connect",
+              "address":"10.43.169.202","port":80}}
+
+`10.43.169.202` is the `carts` ClusterIP. Its endpoints were healthy
+(`10.42.0.14:80`, `10.42.1.2:80`), and the policies allowed the path - `manifests-policy/11-carts.yaml`
+admits `name: front-end` on port 80, and a probe run from inside two `front-end` pods on two
+different nodes reached the ClusterIP and both endpoints 9 times out of 9 (a `404`, because `/carts`
+is not a route there, which is exactly the answer of a listener that is up). Network, DNS, policies
+and service wiring were all fine, and half the requests still got a reset.
+
+What a reset means here is that the destination port accepted nobody: the connection reached a pod
+whose process was not listening on 80 yet. That is the JVM's first minute, and it should never be in
+the endpoints - `readinessProbe` is the field that decides it. The chart has probes on all eight
+application templates. The manifests had them on four: `catalogue`, `front-end`, `payment`, `user`.
+The four without were **`carts`, `orders`, `queue-master` and `shipping`** - the first two of which
+are the checkout path the load generator exercises. Section 25 had recorded that asymmetry on
+purpose ("`carts`, `orders`, `queue-master` and `shipping` stay probe-free on the manifest path -
+that difference remains"), and section 23 had made the gate blind to it with a comfortable-sounding
+justification: *"probes - the manifests rely on `availableReplicas`, the chart on container probes
+with upstream timings"*. That sentence was wrong about the field it excluded. `availableReplicas` is
+not an alternative to readiness: it counts Ready replicas, and Ready is defined by the probe. With no
+probe, a container counts as Ready the moment it is running, so the scheduler of last resort -
+kube-proxy - starts spraying half the traffic at a JVM that has not opened its socket. The gate
+compared everything around that field - image, env, resources, mounts, volumes - and passed a
+**The fix is four probes and one comparison.** `manifests/01-carts-dep.yaml`,
+`11-orders-dep.yaml`, `17-queue-master-dep.yaml` and `23-shipping-dep.yaml` now carry the chart's
+`livenessProbe` and `readinessProbe` verbatim, `httpGet /health` on port 80, with the timings the
+chart settled on in section 25: `periodSeconds: 10`, `timeoutSeconds: 5`, `failureThreshold: 6`,
+`initialDelaySeconds` 420/360 for `carts` and `shipping`, 300/180 for `orders` and `queue-master`.
+The comment on the first one says what it prevents, because the next reader will otherwise see four
+probe blocks and assume decoration.
+
+`check-parity.py` grew `probe_signature()`, a tenth field in the per-workload tuple: every
+container's `livenessProbe` and `readinessProbe`, serialised as written. The docstring's
+"deliberately not compared" list no longer contains probes, and the reason is written where the
+field is compared rather than in a comment nobody reads. A negative test proves the gate is not
+decorative either: stripping the two probes from `Deployment/carts` in an otherwise identical
+render makes it exit 1 with
+
+    Deployment/carts: probes differ (container, livenessProbe/readinessProbe) - this is what
+    decides when the pod receives traffic
+
+**One timeout had to move with them, on the path that had none.** `deploy.ps1`'s plain branch waited
+`--for=condition=available --timeout=300s`; `carts` and `shipping` now become available on the 360th
+second of their readiness `initialDelaySeconds`, so the wait would have failed a stand that was in
+fact coming up. It is 900 s now, the same order as the Helm path's `--timeout 15m`, and the branch
+throws with the exit code instead of leaving a silent failure behind. `complete-demo.yaml` - the
+concatenation CI diffs against `manifests/` - was regenerated from the 30 files (27 565 bytes) and
+the parity report reads **14 workloads, 14 Services, 1 Ingress, 0 differences**, now covering probes
+as well.
+
+**The load generator says so.** The four deployments were rolled out (`kubectl apply` of the four
+files, new pods Ready on the 360th second, `carts` down to a single endpoint while the second
+replica the HPA added sat at `0/1`), and the generator was applied again: `checks` **100.00%
+(505 of 505)**, `http_req_failed` **0 out of 820**, `cart accepts item` and `order created` both
+green, twice in a row on the same stand - the same numbers the Helm path produced in section 25.
+The first run after applying the generator was 82.77%: its failures were `connection refused` to the
+**front-end** ClusterIP, from the moment the HPA was scaling the front-end back from five replicas to
+one after the quiet period, and the next run was clean. That is a scaling transient on a stand that
+had just gone from idle to 10 VUs, not the defect this section is about - but it is why the numbers
+quoted above are the runs after the stand had settled, and why "first run is red, second is green"
+is not accepted as evidence anywhere in this file.
+
+**What is left.** Nothing on probes: the two paths now describe the same pods, and the gate would
+say so if they stopped. The `nodeSelector` asymmetry section 23 lists stays as it was - inert on a
+one-OS cluster. And the diagnosis worth remembering is not "add a probe": it is that a green gate
+over nine fields said nothing about a tenth, and the excluded field was the one that decides whether
+a pod receives the traffic at all. The next exclusion has to be argued with the API server in mind,
+not with a phrase that sounds like a reason.
