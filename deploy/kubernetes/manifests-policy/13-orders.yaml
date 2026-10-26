@@ -4,6 +4,17 @@
 # from `user`. Its ingress is narrow (the UI) while its egress is wide, because
 # that is what a checkout orchestration service really does; a policy that hid
 # this would make the architecture look simpler than it is.
+#
+# `carts` belongs in that egress list, and its absence was a real bug, not a
+# tightening: `OrdersController` calls `AsyncGetService.getDataList` against the
+# cart service while placing an order, and kube-router implements "not allowed"
+# as REJECT rather than DROP - so a checkout did not hang, it failed fast with
+# `java.net.ConnectException: Connection refused` and the front-end answered
+# "Unable to create order due to unspecified IO error" (HTTP 500). The other
+# side of the pair was already there: `manifests-policy/11-carts.yaml` has
+# allowed ingress from `name: orders` all along, which is exactly how an
+# asymmetric pair like this survives review. Measured on the stand: with this
+# rule temporarily added by hand, the same request returned 201.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -33,6 +44,9 @@ spec:
         - protocol: TCP
           port: 27017
     - to:
+        - podSelector:
+            matchLabels:
+              name: carts
         - podSelector:
             matchLabels:
               name: payment

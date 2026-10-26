@@ -279,8 +279,12 @@ $k3dContainers = @(docker ps --filter "name=k3d-sock-shop" --format "{{.Names}}"
     Where-Object { $_ -match '^k3d-sock-shop-' })
 if ($k3dContainers.Count -gt 0) {
     docker update --restart=no $k3dContainers | Out-Null
-    Write-Host ("    restart policy -> no on {0} k3d container(s); start the stand with " +
-                "deploy\stand.ps1 -Start" -f $k3dContainers.Count) -ForegroundColor Gray
+    # The parentheses matter: `-f` binds to the *last* operand of `+`, so without
+    # them the format string was `deploy\stand.ps1 -Start` (no placeholders) and
+    # the line printed a literal `{0}` instead of the container count. Seen in the
+    # first -Helm run on a fresh cluster (FIXES.md, section 24).
+    Write-Host (("    restart policy -> no on {0} k3d container(s); start the stand with " +
+                 "deploy\stand.ps1 -Start") -f $k3dContainers.Count) -ForegroundColor Gray
 }
 
 # --- 2. Application ---------------------------------------------------------
