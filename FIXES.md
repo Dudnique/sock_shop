@@ -1429,6 +1429,108 @@ the user service's database variable are now identical on both sides, but "ident
 what the stand runs" is the entire argument - until the chart itself is deployed, no
 chart-specific behaviour is exercised at all.
 
+---
+
+## 24. The first `-Helm` run: the chart path, deployed, and the checkout it broke
+
+**Why this run had to happen.** Section 23 ends with the honest limitation: the chart
+path had never been installed end-to-end, so the supported claim was "both paths render
+the same pod spec", not "the chart path serves traffic". Everything below was measured on
+`.\\deploy.ps1 -Down` followed by `.\\deploy.ps1 -Helm` on a fresh cluster, on 2026-10-26.
+
+**Timings, because they decide whether the path is usable.** `terraform destroy`:
+11 s for the cluster plus the kubeconfig. `terraform apply`: 30 s to a three-node k3d
+cluster. `helm upgrade --install ... --wait --timeout 10m`: about six minutes, and it is
+the chart's own probe timings that set that number (`carts` and `shipping` have
+`initialDelaySeconds: 360`). The remaining six steps of `deploy.ps1` (policies, logging,
+tracing, monitoring, alerting) took another two. End state: 14/14 chart pods `Running`
+and Ready, `http://localhost:8080/` **200 on 8688 bytes** - the same page the manifest
+path serves.
+
+**What the run confirmed.** Every row is a claim from section 23 that until now rested on
+a render, checked against the live chart objects:
+
+| Claim | Measured on the chart path |
+| ----- | -------------------------- |
+| `payment` listens on 80 and its Service points there | `/proc/net/tcp6` in the pod: one `LISTEN` on `:0050`, none on `:1F90`; Service `payment` -> `10.42.0.8:80`; `method=Authorise result=true` in the payment log when an order is placed |
+| the JVM services run the image's `ENTRYPOINT`, not the chart's copied command | `carts`, `orders`, `shipping`, `queue-master`: `.spec.template.spec.containers[0].command` and `.args` are `None` |
+| `JAVA_OPTS` without `PermSize`, with `-Dspring.zipkin.enabled=false` | `-Xms64m -Xmx128m -XX:+UseG1GC -Djava.security.egd=file:/dev/urandom -Dspring.zipkin.enabled=false` on all four |
+| `user` starts from `mongo=user-db:27017`, no flags | env is exactly that, `command`/`args` empty |
+| `ZIPKIN` reaches Jaeger | all four services point at `zipkin.jaeger.svc.cluster.local:9411`; Jaeger's `/api/services` lists `payment`, `user`, `catalogue` with traces timestamped *during* this run |
+| the seven `prometheus.io/scrape` annotations are what makes metrics exist | `TARGETS` has 11 `kubernetes-service-endpoints` jobs, all `up=1`: six application services on `:80` (`carts`, `catalogue`, `orders`, `payment`, `shipping`, `user`), `front-end` on `:8079`, `rabbitmq` on `:9090`, plus kube-dns and alertmanager |
+| `queue-master` is *not* announced to Prometheus | no target, and no `ScrapeTargetDown` - the manifests' reason for dropping that annotation survives in the chart |
+| `rabbitmq-exporter` sidecar is back | two containers in the pod, exporter scraped on `:9090` (`up=1`) |
+| an order passes end-to-end | `POST /orders` -> **201**, `data.customerOrder` count 2, payment `Authorise result=true`, and `queue-master` logs `Received shipment task: <customerId>` for both |
+
+Two things that looked like bugs and were not: `zipkin.jaeger.svc.cluster.local` produced
+`no such host` in payment's log for the first three minutes, because `deploy.ps1` applies
+the application in step 2/8 and the tracing stack in step 4/8 - the tracer reconnects, and
+later traces arrive. And the manifest path's `availableReplicas` vs the chart's container
+probes is not a rendering difference at all: it changes *endpoint membership*, see below.
+
+**What it broke: checkout, because a NetworkPolicy pair was asymmetric.**
+
+| Where | What |
+| ----- | ---- |
+| `front-end` | `POST /orders` -> **500** `Unable to create order due to unspecified IO error.` |
+| `orders` log | `java.net.ConnectException: Connection refused` from `AsyncGetService.getDataList` |
+| `manifests-policy/13-orders.yaml` | egress allowed `orders-db:27017`, and `payment`/`shipping`/`user` on `:80` - **not `carts`** |
+| `manifests-policy/11-carts.yaml` | ingress already allowed `name: orders` - so the pair was half-written, and the half that existed made the intent look satisfied |
+
+kube-router implements "not allowed" as `REJECT`, not `DROP`, which is why the failure was
+fast (**RST**) instead of a 30-second hang: a checkout returned 500 in milliseconds. The
+fix is one `podSelector` in the `orders` egress rule, measured in the order it was found:
+a NetworkPolicy added by hand (allow `orders` -> `carts:80`) turned the same request into
+**201**; the rule was then written into `manifests-policy/13-orders.yaml`, the temporary
+policy deleted, the file applied, and the next order returned **201** again - with
+`customerOrder` = 2 proving both orders persisted.
+
+This bug had nothing to do with the Helm chart: policies come from `manifests-policy/` on
+both paths, and the manifest path has been one `POST /orders` away from it since those
+policies were written. It surfaced here only because this is the first time the stand was
+asked to place an order rather than to render.
+
+**What is broken and is *not* this repository's chart: RabbitMQ's management API.**
+
+| Measurement | Value |
+| ----------- | ----- |
+| `rabbitmq_up` in Prometheus | `0`, continuously, for the 40 minutes checked |
+| exporter log | 67 x `statusCode=500` from `http://127.0.0.1:15672` |
+| rabbitmq log | 152 `badarith` reports in 5 minutes, at `rabbit_mgmt_stats:rate_from_difference/2` (`src/rabbit_mgmt_stats.erl`, line 630) |
+| consequences | `/api/overview`, `/api/nodes`, `/api/queues` answer 500, so `rabbitmq_queues`, `rabbitmq_queue_messages_ready` and `rabbitmq_connections` do not exist |
+| AMQP, meanwhile | healthy: `queue-master` opened `amqp://guest@...:5672`, declared `shipping-task`, and received both shipment tasks |
+
+So the scrape target is `up` (the exporter answers, and answers honestly that it cannot
+read RabbitMQ), the broker itself works, and only the *management plugin's statistics*
+are dead. RabbitMQ `3.6.8-management` is from 2016 and EOL; the exporter, the Service
+annotation and the dashboard are all correct and starved. Deciding between upgrading the
+broker (and re-testing `queue-master` against it) and declaring "no RabbitMQ metrics on
+this stand" is a separate call, which is why it is recorded here instead of patched at
+2 a.m. The important part for section 23 is that this is **not** chart drift: the chart's
+`rabbitmq` container is byte-for-byte the manifests' (image, ports, env - the gate says
+so), so the manifest path would report exactly the same zero.
+
+**Three smaller things the run produced.**
+
+| Finding | Evidence | What was done |
+| ------- | -------- | ------------- |
+| `deploy.ps1` printed a literal `{0}` | `restart policy -> no on {0} k3d container(s)` | `-f` binds to the last operand of `+`, so the format string was `deploy\stand.ps1 -Start`. Parenthesised the concatenation |
+| the load generator is dead on a modern kernel | `weaveworksdemos/load-test:0.1.1` (Python 2) logs `Segmentation fault (core dumped)` in a loop; `customerOrder` stayed 0 for the 2.5 minutes it ran | Nothing yet - the loadtest manifests are a separate step; the checkout above was driven by hand instead. It needs a rebuilt image, and that is a TODO |
+| "no endpoints" looks like `ECONNREFUSED`, not like a timeout | A probe pod that was labelled `name: orders` (to pass the policies) became a **second endpoint of the `orders` Service**; having no listener on 80, it produced `ECONNREFUSED` for every request that landed on it | Deleted the pod. The episode is worth keeping because it explains the class of failure the chart's probes can cause: `periodSeconds: 3`, `timeoutSeconds: 1`, `failureThreshold: 3` means three missed one-second probes remove a JVM from the endpoints, and a client then sees a connection refused, not a slow response. The manifests have no container probes at all, so this failure mode exists only on the chart path |
+
+**What is left after this run.** The three allowlisted image differences
+(`mongo` vs `mongo:4.4.0` twice, `user-db` `0.3.0` vs `0.4.0`) are untouched: they need a
+decision about which side is right, not another render. RabbitMQ metrics need a broker
+decision. The load generator needs an image that runs.
+
+**Idempotency, tested rather than assumed.** On the same cluster, `helm uninstall sock-shop`
+followed by `helm upgrade --install ... --rollback-on-failure --wait` left the release
+`deployed` with 14/14 pods Ready again (13 x `1/1` and the RabbitMQ pod `2/2`), and the
+fixed NetworkPolicy still let a new order through - the policy is applied by `deploy.ps1`
+outside the release, so a chart reinstall does not disturb it. What a reinstall *does*
+destroy is application data: `orders-db` comes back empty, so `data.customerOrder` counts
+from zero again.
+
 
 
 
