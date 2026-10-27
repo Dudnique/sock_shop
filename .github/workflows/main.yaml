@@ -2,17 +2,24 @@ name: ci
 
 # Action runtime requirement: every `uses:` below must declare `runs.using: node24`.
 # Node 20 was removed from GitHub-hosted runners on 2026-09-23, so node20 majors
-# (actions/checkout@v4, azure/setup-helm@v4, hashicorp/setup-terraform@v3,
-# docker/*@v3, docker/build-push-action@v5) are force-run on Node 24 and emit
-# "Node.js 20 is deprecated" annotations. Keep the lowest node24 major pinned here
-# (docker/build-push-action switched only in v7 - v6 is still node20).
+# (actions/checkout@v4, azure/setup-helm@v4, hashicorp/setup-terraform@v3) are
+# force-run on Node 24 and emit "Node.js 20 is deprecated" annotations. Keep the
+# lowest node24 major pinned here.
 on:
   push:
-    branches:
-    - "*"  # run for branches
+    branches: [main]
     tags:
     - "*"  # run for tags
+  pull_request:
+    branches: [main]
   workflow_dispatch:  # allow manual runs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -258,50 +265,7 @@ jobs:
         terraform validate
 
   # ---------------------------------------------------------------------------
-  # 6) Build and push the openapi / healthcheck helper images.
-  #
-  #    The sources live under legacy/ (archived together with the rest of the
-  #    AWS-era stack), but the images keep their original names on a release tag,
-  #    so the build context points there. Without this a v* tag fails with
-  #    "context not found" while every branch push stays green - the worst kind of
-  #    breakage, because it only shows up at release time.
-  #
-  #    Release-only job: it publishes real images to Docker Hub, so it must NOT
-  #    run on every push to the default branch. We deliberately gate it on
-  #    version tags (v*) only:
-  #      - pushing to a public registry on every commit would spam it with junk
-  #        tags and could publish broken images,
-  #      - it needs repository secrets (DOCKER_USER / DOCKER_PASS), which are
-  #        absent on forks, so it would fail there anyway,
-  #      - the usual convention is "verify on every commit, publish on release".
-  #    This job is kept for reference; without a v* tag it simply never runs.
-  # ---------------------------------------------------------------------------
-  build-test-images:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    env:
-      GROUP: weaveworksdemos
-    strategy:
-      matrix:
-        repo: ["openapi", "healthcheck"]
-    steps:
-    - uses: actions/checkout@v5
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
-    - name: Login to DockerHub
-      uses: docker/login-action@v4
-      with:
-        username: ${{ secrets.DOCKER_USER }}
-        password: ${{ secrets.DOCKER_PASS }}
-    - name: Build and push
-      uses: docker/build-push-action@v7
-      with:
-        context: legacy/${{ matrix.repo }}
-        push: true
-        tags: ${{ env.GROUP }}/${{ matrix.repo }}:${{ github.sha }}
-
-  # ---------------------------------------------------------------------------
-  # 7) The deployment scripts are never executed on CI - there is no Docker
+  # 6) The deployment scripts are never executed on CI - there is no Docker
   #    Desktop on a Linux runner - which is exactly why two of their defects
   #    survived: a jsonpath argument that only breaks under Windows PowerShell
   #    5.1, and a .ps1 saved as UTF-8 without a BOM (5.1 then reads its
