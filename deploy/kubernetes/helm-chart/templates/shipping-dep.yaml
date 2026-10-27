@@ -14,10 +14,6 @@ spec:
     metadata:
       labels:
         name: shipping
-      {{- if .Values.istio.enabled }}
-      annotations:
-        sidecar.istio.io/rewriteAppHTTPProbers: "true"
-      {{- end }}
     spec:
       containers:
       - name: shipping
