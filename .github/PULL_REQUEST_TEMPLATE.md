@@ -1,3 +1,8 @@
-- Read the contribution guidelines
-- Include a reference to a related issue in this repository
-- A description of the changes proposed in the pull request
+## What
+<!-- What changes in this PR -->
+
+## Why
+<!-- The problem or the reason behind it -->
+
+## How it was verified
+<!-- Commands run, CI jobs, cluster checks -->

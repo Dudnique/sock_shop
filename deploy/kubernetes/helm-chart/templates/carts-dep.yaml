@@ -14,10 +14,6 @@ spec:
     metadata:
       labels:
         name: carts
-      {{- if .Values.istio.enabled }}
-      annotations:
-        sidecar.istio.io/rewriteAppHTTPProbers: "true"
-      {{- end }}
     spec:
       containers:
       - name: carts

@@ -21,9 +21,6 @@ java:
     # listens.
     options: -Xms64m -Xmx128m -XX:+UseG1GC -Djava.security.egd=file:/dev/urandom -Dspring.zipkin.enabled=false
 
-istio:
-    enabled: false
-
 ingress:
     className: traefik
     annotations:
@@ -215,35 +212,10 @@ user:
             cpu: 100m
             memory: 100Mi
 
-zipkincron:
-    image:
-        repo: openzipkin/zipkin-dependencies
-        tag: 1.4.0
-    resources:
-        limits:
-            cpu: 300m
-            memory: 1000Mi
-        requests:
-            cpu: 100m
-            memory: 300Mi
-
 zipkin:
-    image:
-        repo: openzipkin/zipkin
-        tag: 2.21
-    resources:
-        limits:
-            cpu: 300m
-            memory: 1000Mi
-        requests:
-            cpu: 100m
-            memory: 300Mi
-    # The bundled tracing stack (zipkin + zipkin-mysql + zipkin-cron) - and it
-    # stays off, not because tracing is off: the Jaeger instance in namespace
-    # `jaeger` runs with COLLECTOR_ZIPKIN_HTTP_PORT=:9411 and publishes a Service
-    # alias named `zipkin`, so the application already has a receiver. Enabling
-    # this would add a third MySQL and a second collector for data Jaeger stores.
-    enabled: false
+    # Tracing goes to the Jaeger instance in namespace `jaeger`, which accepts
+    # the Zipkin protocol on :9411 and publishes a Service alias named `zipkin`.
+    # The upstream Zipkin + MySQL + cron stack is not part of this chart.
     # What the tracers receive, byte-identical to manifests/ (catalogue, payment,
     # user). The chart used to build the address from `url:
     # zipkin.zipkin.svc.cluster.local` - a Service that has never existed on this
@@ -256,15 +228,3 @@ zipkin:
     # an untested tracing change, and differing from it would be a difference the
     # parity gate reports.
     shippingEndpoint: zipkin.jaeger.svc.cluster.local
-
-zipkinmysql:
-    image:
-        repo: openzipkin/zipkin-mysql
-        tag: 1.20.0
-    resources:
-        requests:
-            memory: 256Mi
-            cpu: 250m
-        limits:
-            memory: 768Mi
-            cpu: 1
