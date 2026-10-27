@@ -459,8 +459,8 @@ if ($env:TELEGRAM_BOT_TOKEN -and $env:SLACK_WEBHOOK_URL) {
     Write-Host "    alertmanager-secrets is in the cluster but its values are not readable - leaving it untouched"
 } else {
     throw ("alertmanager-secrets is missing and no credentials are available. " +
-           "Create deploy\secrets.local.ps1 from deploy\secrets.local.ps1.example (it is git-ignored) " +
-           "and put the token and the webhook URL in it - there is no need to type a token on a command line.")
+           "Create deploy\secrets.local.ps1 (it is git-ignored; see README, section Secrets) " +
+           "and set $env:TELEGRAM_BOT_TOKEN and $env:SLACK_WEBHOOK_URL in it - there is no need to type a token on a command line.")
 }
 
 # note: examples/ is a sub-directory, and `kubectl apply -f <dir>` is NOT

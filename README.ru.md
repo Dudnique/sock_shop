@@ -172,8 +172,13 @@ incoming-webhook. Они лежат в `deploy\secrets.local.ps1` — git-игн
 заполни: больше ни один шаг не попросит эти значения:
 
 ```powershell
-Copy-Item deploy\secrets.local.ps1.example deploy\secrets.local.ps1
-# затем открой deploy\secrets.local.ps1 и впиши реальные значения
+# deploy\secrets.local.ps1 - создаётся один раз и остаётся только на твоей машине
+$env:TELEGRAM_BOT_TOKEN = '<токен бота>'
+$env:SLACK_WEBHOOK_URL  = '<URL incoming-webhook>'
+
+# необязательно: без него deploy.ps1 сгенерирует пароль админа Grafana при первом
+# деплое, один раз напечатает его и дальше берёт значение, сохранённое в кластере
+$env:GRAFANA_ADMIN_PASSWORD = '<пароль>'
 ```
 
 Переменные окружения `TELEGRAM_BOT_TOKEN` и `SLACK_WEBHOOK_URL` тоже работают — это

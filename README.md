@@ -169,8 +169,13 @@ that `deploy.ps1` sources on every run. Create it once and fill it in once - no
 later step asks you for the values again:
 
 ```powershell
-Copy-Item deploy\secrets.local.ps1.example deploy\secrets.local.ps1
-# then edit deploy\secrets.local.ps1 and fill in the real values
+# deploy\secrets.local.ps1 - create it once, it stays on your machine
+$env:TELEGRAM_BOT_TOKEN = '<bot token>'
+$env:SLACK_WEBHOOK_URL  = '<incoming-webhook URL>'
+
+# optional: without it deploy.ps1 generates a Grafana admin password on the first
+# deploy, prints it once, and reuses the value stored in the cluster afterwards
+$env:GRAFANA_ADMIN_PASSWORD = '<password>'
 ```
 
 Environment variables (`TELEGRAM_BOT_TOKEN`, `SLACK_WEBHOOK_URL`) work as well -
