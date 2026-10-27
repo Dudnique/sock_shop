@@ -418,6 +418,7 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 ├── aiops/
 │   └── triage-bot/                         # AIOps-советник M1: код, 136 тестов, run-local.ps1
 ├── deploy/
+│   ├── grafana_check.py                    # прогоняет запросы всех дашбордов через Grafana, показывает пустые
 │   └── kubernetes/
 │       ├── manifests/                      # приложение, пофайлово (00 ... 29)
 │       ├── manifests-logging/              # Loki + Promtail (логи подов)
