@@ -2,6 +2,8 @@
 
 > [English](README.md) | **Русский**
 
+[![ci](https://github.com/Dudnique/sock_shop/actions/workflows/main.yaml/badge.svg?branch=main)](https://github.com/Dudnique/sock_shop/actions/workflows/main.yaml)
+
 Готовый к запуску форк демо-приложения **Sock Shop**
 (upstream: [microservices-demo/microservices-demo](https://github.com/microservices-demo/microservices-demo)).
 
@@ -501,6 +503,25 @@ Prometheus и Loki держат данные в `emptyDir`, а бот читае
 Это мера только для стенда, а не продовый паттерн: на реальном кластере ответ — лимиты ресурсов,
 настоящие тома, retention и алерты на запас памяти. Разбор и таблица соответствий — в `FIXES.md`,
 раздел 17.
+
+## Процесс и CI
+
+`main` защищён: напрямую в него ничего не пушится. Изменение идёт через короткоживущую ветку
+и pull request (`fix/...`, `docs/...`, `ci/...`, `chore/...`), а PR сливается только когда
+зелёные все шесть jobs workflow `ci`:
+
+| Job | Что охраняет |
+|---|---|
+| `complete-demo-sync-check` | `deploy/kubernetes/complete-demo.yaml` - побайтовая конкатенация `manifests/*` |
+| `manifests-validate` | `kubeconform -strict` по всем манифестам и `promtool check rules` |
+| `helm-chart-validate` | `helm lint --strict`, рендер и `check-parity.py`: чарт и `manifests/` описывают одни и те же workload'ы, Service, Ingress и пробы |
+| `aiops-tests` | модульные тесты триаж-бота и его ограничители |
+| `terraform-validate` | `terraform fmt -check` и `validate` для описания k3d |
+| `scripts-guard` | каждый PowerShell-скрипт парсится, а ловушки с кодировкой и jsonpath из `FIXES.md` §17 остаются закрытыми |
+
+Workflow работает с токеном только на чтение, каждый action закреплён по SHA коммита, а
+Dependabot открывает PR на новые версии actions и провайдеров Terraform. Описание PR отвечает
+на три вопроса: что изменилось, зачем и как проверено.
 
 ## Лицензия
 

@@ -2,6 +2,8 @@
 
 > **English** | [Русский](README.ru.md)
 
+[![ci](https://github.com/Dudnique/sock_shop/actions/workflows/main.yaml/badge.svg?branch=main)](https://github.com/Dudnique/sock_shop/actions/workflows/main.yaml)
+
 A ready-to-run fork of the **Sock Shop** demo application
 (upstream: [microservices-demo/microservices-demo](https://github.com/microservices-demo/microservices-demo)).
 
@@ -499,6 +501,25 @@ guessed, and it leaves the application, the Secrets and the bot alone.
 That is a stand-only measure, not a production pattern: on a real cluster the answer is resource
 limits, real volumes, retention and alerting on memory headroom. `FIXES.md`, section 17 has the
 analysis and the mapping.
+
+## Workflow and CI
+
+`main` is protected: nothing is pushed to it directly. A change goes through a short-lived
+branch and a pull request (`fix/...`, `docs/...`, `ci/...`, `chore/...`), and the PR is merged
+only when all six jobs of the `ci` workflow are green:
+
+| Job | What it guards |
+|---|---|
+| `complete-demo-sync-check` | `deploy/kubernetes/complete-demo.yaml` is byte-for-byte the concatenation of `manifests/*` |
+| `manifests-validate` | `kubeconform -strict` over every manifest, plus `promtool check rules` |
+| `helm-chart-validate` | `helm lint --strict`, render, and `check-parity.py`: chart and `manifests/` describe the same workloads, Services, Ingress and probes |
+| `aiops-tests` | the triage bot's unit tests and guardrails |
+| `terraform-validate` | `terraform fmt -check` and `validate` for the k3d definition |
+| `scripts-guard` | every PowerShell script parses, and the encoding/jsonpath traps from `FIXES.md` §17 stay closed |
+
+The workflow runs with a read-only token, every action is pinned to a commit SHA, and
+Dependabot opens PRs for newer versions of the actions and the Terraform providers. A PR
+description answers three questions: what changed, why, and how it was verified.
 
 ## License
 
