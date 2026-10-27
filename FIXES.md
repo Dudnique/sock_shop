@@ -1798,3 +1798,40 @@ one-OS cluster. And the diagnosis worth remembering is not "add a probe": it is 
 over nine fields said nothing about a tenth, and the excluded field was the one that decides whether
 a pod receives the traffic at all. The next exclusion has to be argued with the API server in mind,
 not with a phrase that sounds like a reason.
+
+## 27. The first run of every new load-test pod lost its login: a network that arrives a second late
+
+**Symptom.** On a clean `deploy.ps1` (Docker Desktop restarted, no cluster before, 14 pods Ready,
+32 of 32 Prometheus targets `up`, no alerts firing) the load generator's *first* k6 run on each of
+its two pods gave `checks` **79.20%** (400 of 505) and `http_req_failed` **13.41%** (110 of 820):
+`logged in` 0 of 5, `order created` 0 of 100, every other check green. Every later run of the same
+pods - four of them - was **100.00% (505 of 505)** with **0 of 820** failed requests.
+
+**Diagnosis.** The failed requests were six in total, all in the first two seconds of the pod's life
+and all the same: `dial tcp <front-end ClusterIP>:80: connect: connection refused` on the five
+`POST /register` and the one `GET /login`. k6 logs in once per virtual user, so five lost logins
+meant five virtual users with no session, and a `POST /orders` without a session fails for every
+iteration - that is the 100 of 100. Nothing was wrong with `front-end` (no restarts, Ready), with
+the HPA, or with the probes of section 26. A throw-away `busybox` pod in the same namespace, asking
+`front-end` every half second, reproduced it: the first attempt fails, the second and all later ones
+succeed. That is consistent with kube-router programming the network policies for a new pod
+asynchronously: until it has, the default-deny of `manifests-policy` answers `REJECT`, which is the
+same `ECONNREFUSED` that `verify-netpol.ps1` reports for traffic that is blocked on purpose. The
+kube-router side was not inspected; what is established is the behaviour, not the mechanism.
+
+**Fix.** `manifests-loadtest/loadtest-dep.yaml` gets an `initContainer` that retries `GET /` on
+`front-end` for up to 60 seconds before k6 starts. An init container shares the pod's IP and so its
+policy, and keeping the wait out of k6 keeps those requests out of `http_req_failed` - a `setup()`
+function in the script would have counted them. After the change both fresh pods gave `checks`
+**100.00% (505 of 505)** and `http_req_failed` **0 of 820** on their very first run, with no
+`Request Failed` lines. Two pods before and two after is a small sample, and it is the whole sample.
+
+**The check that was missing.** Sections 25 and 26 quote "91 queries, 0 empty" from a
+`grafana_check.py` that was never committed, so the check could not be repeated. It is now
+`deploy/grafana_check.py`: it port-forwards Grafana, reads the admin password from the
+`grafana-admin` Secret without printing it, and sends every panel query - including panels nested in
+`rows` and the Loki ones - through Grafana's own datasource proxy. On this stand, after the load
+test: **92 queries, 0 empty**, seven dashboards. Two traps it had to get past are worth keeping: this
+Grafana proxies a datasource by numeric `id` only (the `uid` route answers `500 Unable to load
+datasource meta data`), and a template variable set to "All" must turn `instance="$node"` into
+`instance=~".*"`, or the query is empty for a reason that has nothing to do with the stand.
