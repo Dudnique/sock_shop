@@ -25,7 +25,7 @@
 |---|---|
 | Воспроизводимый кластер k3s/k3d, описанный в Terraform и поднимаемый одной командой (`.\deploy.ps1`) | Облачный кластер: нет облачного аккаунта, managed control plane и балансировщика |
 | 14 workload'ов (8 сервисов + 5 баз + RabbitMQ), Ingress, 8 HPA, 17 NetworkPolicy | Мультитенантность: один оператор, отдельный namespace на слой, нет разделения dev/stage/prod |
-| Все три столпа наблюдаемости, связанные end-to-end: 11 правил алертов в 4 группах, 7 дашбордов, 3 datasource'а | Прод-надёжность хранения: TSDB Prometheus на `emptyDir`, Jaeger в памяти, Loki — несколько дней на `hostPath` |
+| Все три столпа наблюдаемости, связанные end-to-end: 14 правил алертов в 4 группах, 7 дашбордов, 3 datasource'а | Прод-надёжность хранения: TSDB Prometheus на `emptyDir`, Jaeger в памяти, Loki на `emptyDir`, логи живут не дольше пода |
 | Алерты, в которых есть `namespace/deployment/pod` и runbook-команда, доставка в Telegram **и** Slack | Дежурства, политика эскалации, error budget и отчётность по SLO |
 | AIOps-бот триажа: ответ LLM валидируется по whitelist, действия — только через ServiceAccount с узкими правами | Всё, что касается реальных данных: ни PII, ни платёжной интеграции, ни настоящих клиентов |
 | 136 автотестов бота плюс CI-гейты (`kubeconform`, `helm lint`, паритет чарта и манифестов, `terraform validate`, `promtool`) | Хранилище секретов: `Secret` + git-игнорируемый локальный файл, без Vault и sealed-secrets |
@@ -280,7 +280,7 @@ helm upgrade --install sock-shop deploy\kubernetes\helm-chart --namespace sock-s
 значением из чарта падает с `conflict with "k3s" with subresource "scale"` —
 и апгрейд, и откат (FIXES.md, раздел 25).
 
-Чарт покрывает именно приложение: 8 сервисов, 6 хранилищ, RabbitMQ и ingress.
+Чарт покрывает именно приложение: 8 сервисов, 5 хранилищ, RabbitMQ и ingress.
 Сетевые политики, автоскейлеры, логирование, трейсинг, мониторинг, алертинг и
 триаж-бот остаются на обычных манифестах — и продолжают работать, потому что чарт
 проставляет подам те же метки `name: <service>`, что и `manifests/`, а селекторы
@@ -387,7 +387,7 @@ kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-passwor
 |---|---|---|
 | Метрики | Prometheus <http://localhost:9090> | цели приложения находятся автоматически по аннотациям подов/Service; плюс `node-exporter` (3 ноды) и `kube-state-metrics` |
 | Дашборды | Grafana <http://grafana.localhost:8080> | 7 дашбордов и 3 datasource импортирует Job `grafana-import-dashboards` |
-| Алерты | правила Prometheus + Alertmanager <http://localhost:9093> | 11 правил в 4 группах — `availability`, `application`, `infrastructure`, `meta`; доставляются в Telegram и Slack |
+| Алерты | правила Prometheus + Alertmanager <http://localhost:9093> | 14 правил в 4 группах — `availability`, `application`, `infrastructure`, `meta`; доставляются в Telegram и Slack |
 | Пробы | `blackbox-exporter` | два маршрута с меткой `probe_scope`: `ingress` (Service Traefik) и `external` (опубликованный порт, `host.docker.internal:8080`) |
 | Логи | Loki (только через Grafana **Explore**) | ни UI, ни хост-порта — намеренно |
 
@@ -414,7 +414,7 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 ├── FIXES.md                                # что исправлено и почему (EN)
 ├── FIXES.ru.md                             # что исправлено и почему (RU)
 ├── aiops/
-│   └── triage-bot/                         # AIOps-советник M1: код, 94 теста, run-local.ps1
+│   └── triage-bot/                         # AIOps-советник M1: код, 136 тестов, run-local.ps1
 ├── deploy/
 │   └── kubernetes/
 │       ├── manifests/                      # приложение, пофайлово (00 ... 29)
