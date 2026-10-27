@@ -27,7 +27,7 @@ spec:
       # entry, so dashboards/datasources are imported reliably.
       initContainers:
       - name: wait-for-grafana
-        image: giantswarm/tiny-tools
+        image: giantswarm/tiny-tools@sha256:8ccea5962d6e24cf90ac726ff8af6ad25ba8dc6a691ad47cb455e3dfcd3f4c22
         imagePullPolicy: IfNotPresent
         # The credentials are needed here too: /api/health answers even from the
         # PREVIOUS pod, which still has the previous password. Waiting for health
@@ -62,7 +62,7 @@ spec:
           echo "grafana is ready and authenticates with the Secret credentials";
       containers:
       - name: grafana-import-dashboards
-        image: giantswarm/tiny-tools
+        image: giantswarm/tiny-tools@sha256:8ccea5962d6e24cf90ac726ff8af6ad25ba8dc6a691ad47cb455e3dfcd3f4c22
         command: ["/bin/sh", "-c"]
         workingDir: /opt/grafana-import-dashboards
         # Credentials are taken from the `grafana-admin` Secret instead of being
