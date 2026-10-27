@@ -55,7 +55,7 @@ jobs:
     - uses: actions/checkout@v5
     - name: Validate manifests (kubeconform -strict)
       run: |
-        docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:latest \
+        docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:v0.8.0 \
           -strict -summary -ignore-missing-schemas \
           -ignore-filename-pattern '.*/legacy/.*' \
           /work/deploy/kubernetes/manifests \
@@ -228,7 +228,7 @@ jobs:
         # installs (--namespace sock-shop) is what makes the parity step below
         # compare the pod that actually runs.
         helm template sock-shop deploy/kubernetes/helm-chart --namespace sock-shop > rendered.yaml
-        docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:latest \
+        docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:v0.8.0 \
           -strict -summary -ignore-missing-schemas /work/rendered.yaml
     - name: Compare the rendered chart with manifests/
       run: |

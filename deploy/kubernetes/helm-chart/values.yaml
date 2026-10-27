@@ -177,7 +177,7 @@ rabbitmq:
 sessiondb:
     image:
         repo: redis
-        tag: alpine
+        tag: 7.2-alpine
     resources: {}
     persistentVolume:
         storageClass: ''
