@@ -1918,5 +1918,15 @@ side; it is still wrong, and now it is covered.
 | `PodCrashLooping` | healthy `catalogue` | `escalate_human`: no container of the pod is in a waiting state |
 | `PodRestartFlapping` | healthy `catalogue` | `escalate_human`: `pod_restarts_15m = 0`, the rule needs more than 3 |
 
+**"No log lines" that read like a broken Loki.** The cards for a crash-looping pod said
+`gap: loki: no log lines in the window`, and it looked as if Loki had stopped. It had not: the
+namespace held 500 lines in the same 15 minutes. The pod ran `sh -c "exit 1"` and printed nothing,
+and `front-end` was quiet because the load test had been stopped. `context._silent_workload_gap()`
+now asks Loki for any line of the namespace in the window and says which case it is: "Loki itself
+answers, so the workload wrote nothing", or "no lines for the whole namespace - check promtail and
+Loki". If that probe itself fails, the old wording stays. Checked live without sending anything to
+Telegram (collect_context against port-forwarded Prometheus and Loki): `front-end` -> the first
+wording, `catalogue` -> 20 lines. Tests: 158.
+
 Tests: 156 (was 136), all standard library. Not covered: a pod whose owner is not a Deployment (a
 Job, a StatefulSet) is reported as a named gap and escalates; there is no tier-0 action for it.

@@ -177,6 +177,27 @@ def resolve_deployment(labels: dict, prometheus: "PrometheusClient") -> tuple:
     return deployment, ""
 
 
+def _silent_workload_gap(loki: "LokiClient", namespace: str, window_seconds: int) -> str:
+    """Say WHY there are no log lines: Loki is down, or the workload is silent.
+
+    "loki: no log lines in the window" read like a broken Loki on the live stand,
+    while Loki was fine and the pod simply wrote nothing (a crash-looping
+    container that exits at once prints nothing, and a service nobody is calling
+    is quiet). One cheap question settles it: does Loki have ANY line for the
+    namespace in the same window? Only the answer is stated, never a guess: if
+    the probe itself fails, the old wording stays.
+    """
+    try:
+        anything = loki.log_lines(f'{{namespace="{namespace}"}}', window_seconds, 1)
+    except SourceError:
+        return "loki: no log lines in the window"
+    if anything:
+        return ("loki: no log lines from this workload in the window - Loki itself "
+                f"answers (the {namespace} namespace has logs), so the workload wrote nothing")
+    return (f"loki: no log lines for the whole {namespace} namespace in the window - "
+            "check promtail and Loki")
+
+
 def plan_queries(labels: dict) -> list:
     """The metric questions worth asking about *this* alert - and no others.
 
@@ -376,7 +397,8 @@ def collect_context(alert: dict, settings, prometheus: PrometheusClient,
                     "loki: no pods - the deployment is scaled to 0 (desired=0), "
                     "so there is nothing to log")
             else:
-                context["missing"].append("loki: no log lines in the window")
+                context["missing"].append(_silent_workload_gap(
+                    loki, namespace, settings.log_window_seconds))
         except SourceError as exc:
             context["missing"].append(f"loki: {exc}")
             if metrics:

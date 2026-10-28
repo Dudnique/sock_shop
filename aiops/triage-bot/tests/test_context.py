@@ -123,14 +123,16 @@ class CollectContextTests(unittest.TestCase):
             FakePrometheus({"kube_deployment_spec_replicas": 1,
                             "kube_deployment_status_replicas_available": 1}),
             FakeLoki([]))
-        self.assertIn("loki: no log lines in the window", context["missing"])
+        self.assertTrue(any(line.startswith("loki: no log lines") and "scaled to 0" not in line
+                            for line in context["missing"]), context["missing"])
 
     def test_unknown_desired_replicas_is_not_treated_as_scaled_to_zero(self) -> None:
         """Silence is not evidence: without the number the wording stays honest."""
         context = collect_context(
             {"labels": {"namespace": "sock-shop", "deployment": "front-end"}},
             make_settings(), FakePrometheus(), FakeLoki([]))
-        self.assertIn("loki: no log lines in the window", context["missing"])
+        self.assertTrue(any(line.startswith("loki: no log lines") and "scaled to 0" not in line
+                            for line in context["missing"]), context["missing"])
 
     def test_error_filter_falls_back_to_latest_lines(self) -> None:
         class OnceEmptyLoki(FakeLoki):
@@ -293,6 +295,33 @@ class PodAlertContextTests(unittest.TestCase):
         context = collect_context(self.ALERT, make_settings(),
                                   FakePrometheus(fail=True), FakeLoki())
         self.assertEqual(context["empty"], [])
+
+
+class SilentWorkloadTests(unittest.TestCase):
+    """"No log lines" must say whether Loki is the problem or the workload is quiet."""
+
+    ALERT = {"labels": {"namespace": "sock-shop", "deployment": "front-end"}}
+
+    class SelectiveLoki(FakeLoki):
+        """Answers only for the namespace-wide probe, like a Loki that is up."""
+
+        def log_lines(self, logql, window_seconds, limit):
+            self.queries.append(logql)
+            return ["12:00 other-pod: hello"] if "pod_name" not in logql else []
+
+    def gap(self, loki) -> str:
+        context = collect_context(self.ALERT, make_settings(), FakePrometheus(), loki)
+        return " ".join(context["missing"])
+
+    def test_a_quiet_workload_in_a_namespace_with_logs_says_loki_is_fine(self) -> None:
+        text = self.gap(self.SelectiveLoki())
+        self.assertIn("Loki itself answers", text)
+        self.assertIn("the workload wrote nothing", text)
+
+    def test_a_namespace_with_no_logs_at_all_points_at_loki(self) -> None:
+        text = self.gap(FakeLoki())
+        self.assertIn("whole sock-shop namespace", text)
+        self.assertIn("promtail", text)
 
 
 if __name__ == "__main__":
