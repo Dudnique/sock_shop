@@ -12,7 +12,7 @@ the script talks to it through `kubectl exec`.
 
 | Piece | What it is | Where it runs |
 | ----- | ---------- | ------------- |
-| **Vault** (HashiCorp) | a secret store: values are kept in it, access is by policy, every read is authenticated | a pod in namespace `vault`, **dev mode** |
+| **Vault** (HashiCorp) | a secret store: values are kept in it, access is by policy, every read is authenticated | a pod in namespace `vault`, data on a volume (Raft), sealed after every start |
 | **External Secrets Operator** | a controller that watches `ExternalSecret` objects, reads the named values from Vault and creates ordinary Kubernetes Secrets | three pods in namespace `external-secrets` |
 | **`ExternalSecret` objects** (this directory) | "build the Secret `grafana-admin` from `secret/sock-shop/grafana` in Vault" - a recipe, no values | in git, synced by Argo CD |
 
@@ -60,28 +60,48 @@ there is none to keep:
 `deploy/vault-seed.ps1` creates that policy and role. ESO can therefore read these
 three paths and nothing else, and cannot write at all.
 
-## Dev mode: what it means, honestly
+## Storage, sealing and the root token: what it means
 
-Vault here runs with `server.dev.enabled=true`: **one pod, already unsealed, data
-in memory, a fixed root token (`root`)**.
+Three properties separate this Vault from a throw-away "dev mode" one (which this
+stand used until section 34 of `FIXES.md`):
 
-* Everything in it is **lost when the pod restarts** (Docker Desktop restarted,
-  the node rebooted). The Secrets already in the cluster stay - the
-  `ExternalSecret` objects use `deletionPolicy: Retain` - so a running stand keeps
-  working; but nothing refreshes them, and a new pod would wait for them. Run
-  `.\deploy\vault-seed.ps1` again and it is back (it is idempotent, and reuses the
-  Grafana password already stored).
-* The root token is public (it is in the Helm values in git). That is acceptable
-  only because the Vault is throw-away and reachable only inside the cluster.
-* A real Vault is a different shape: highly available Raft storage on persistent
-  volumes, auto-unseal through a cloud KMS, audit logging, and no static root
-  token. This setup shows the **mechanism** (store, policy, role, operator,
-  rotation); it is not a hardened deployment.
+* **The data is on disk.** Vault stores it itself (the built-in storage is called
+  Raft) on a 1 Gi volume, so a pod restart does not lose it. Nothing has to be
+  written again.
+* **Vault starts sealed.** Sealed means locked: it holds the data but cannot read
+  it and gives nothing out until it is unsealed with a key. The key is generated
+  once, at the first start, by `deploy/vault-seed.ps1` and saved with the root
+  token in `deploy/vault-init.local.json` - **git-ignored, next to
+  `secrets.local.ps1`; whoever holds the file owns the Vault, and losing it loses
+  the data**. After a restart (Docker Desktop restarted, the node rebooted) one
+  command unlocks it and touches nothing else:
+
+      .\deploy\vault-seed.ps1 -UnsealOnly
+
+  While it is sealed, External Secrets cannot read it: the Secrets already in the
+  cluster keep working (`deletionPolicy: Retain`), and `ExternalSecretNotReady`
+  fires after 5 minutes. Running `vault-seed.ps1` without the flag also unseals,
+  and rewrites the values from `secrets.local.ps1`.
+* **There is no public root token.** The root token is generated at the first
+  start and exists only in that local file. The script passes it to the pod over
+  stdin, not on a command line.
+
+If the cluster is rebuilt, the volume is new and the key file is stale: the script
+notices (Vault is uninitialised but the file exists), moves the old file aside as
+`vault-init.local.json.stale-<time>` and initialises afresh. If the file is lost
+but the volume is not, the data cannot be opened - the script says so and what to
+delete if the data does not matter.
+
+What is still a laptop shape: **one pod, one key**. A production Vault runs three
+or five pods (Raft replicates between them), splits the key in several shares held
+by different people, and in AWS is unsealed by KMS on its own (auto-unseal), so
+nobody unseals by hand at all. That is the AWS step; the mechanism shown here
+(store, policy, role, operator, rotation, persistence) is the same.
 
 ## Looking at it
 
     kubectl port-forward -n vault svc/vault 8200:8200      # http://localhost:8200
-    # sign in with the token: root; the values are under secret/sock-shop
+    # sign in with the root_token from deploy\vault-init.local.json; values: secret/sock-shop
 
     kubectl -n monitoring get externalsecret               # STATUS SecretSynced, READY True
     kubectl get clustersecretstore vault                   # READY True

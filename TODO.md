@@ -122,8 +122,8 @@ Deployment по цепочке `kube_pod_owner` -> `kube_replicaset_owner` и п
 е) **Argo CD - сделано** (§30): `deploy.ps1 -GitOps`, девять Application, замерено дважды с чистой
 машины (10 и 11 минут). Остаётся: (1) *сделано (§31):* сайдкары перезагрузки конфига для Prometheus и
 Alertmanager и алерт `ConfigReloadFailed`; (2) *сделано (§32, §33):* секреты из Vault + External Secrets и алерт
-`ExternalSecretNotReady`; остаётся Vault в dev-режиме - это демонстрация механизма (данные в
-памяти, публичный корневой токен), а не защищённое развёртывание; (3) пункт «Terraform для AWS, Helm для локалки» из
+`ExternalSecretNotReady`; Vault теперь с данными на томе, печатью и без публичного токена (§34);
+остаётся боевая форма (3-5 подов, KMS auto-unseal) - шаг AWS; (3) пункт «Terraform для AWS, Helm для локалки» из
 плана - Argo CD уже читает чарт, поэтому, скорее всего, при переезде на AWS придётся менять
 кластер назначения и Terraform, а не чарт (предположение, на AWS не проверялось).
 

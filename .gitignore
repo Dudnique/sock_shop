@@ -146,6 +146,9 @@ crash.log
 
 # Local stand secrets (never commit)
 deploy/secrets.local.ps1
+# Vault's unseal key and root token, written by deploy/vault-seed.ps1 at the first
+# start (and moved aside as vault-init.local.json.stale-* when the cluster is rebuilt)
+deploy/vault-init.local.json*
 
 # Continue.dev agent rules (local tooling, not part of the deployable stand)
 .continue/

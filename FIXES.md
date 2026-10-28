@@ -2118,3 +2118,41 @@ The rule file reached the running Prometheus in 21 s with nobody calling `/-/rel
 
 **Not done.** This tells you that a Secret stopped refreshing; it does not bring Vault's data back by
 itself. The data is still lost on a restart: dev mode keeps it in memory (TODO).
+
+## 34. Vault for real: data on a volume, sealed at start, no public root token
+
+**The gap sections 32 and 33 left.** Vault ran in dev mode: data in memory (a restart lost everything),
+a root token written in git (`root`). Section 33 made the loss visible; this one removes it.
+
+**What changed** (`argocd/apps/values.yaml`, `deploy/vault-seed.ps1`, `deploy.ps1`, `.gitignore`):
+
+* **Data on disk.** `server.dev` is off; `standalone.config` uses `storage "raft"` (Vault's built-in
+  storage) on a 1 Gi `dataStorage` volume.
+* **Sealed at every start, unsealed by the script.** `vault-seed.ps1` step 0 asks `vault status`: if Vault is
+  not initialised it runs `operator init -key-shares=1 -key-threshold=1` and saves the unseal key and the
+  generated root token to `deploy/vault-init.local.json` (added to `.gitignore` *before* the file existed);
+  if it is sealed it unseals it. `-UnsealOnly` does just that and rewrites nothing.
+* **No root token on any command line.** `Invoke-Vault` sends it as the first line of stdin and a tiny
+  `sh` wrapper inside the pod reads it into `VAULT_TOKEN`; the unseal key travels the same way.
+* **A real Vault has no `secret/` store**: the script enables KV v2 there (dev mode did it by itself).
+* **Rebuilt cluster, stale key file**: Vault uninitialised but the file exists -> the file is moved aside as
+  `.stale-<time>` and Vault is initialised afresh. Initialised but the file is missing -> the script stops and
+  says what to delete if the data does not matter.
+* `deploy.ps1` waits for the Vault container to be running (not Ready) before calling the script.
+
+**Measured.** Clean deploy from nothing (`-Down`, key file deleted, `-GitOps -WithAIOps` from the branch):
+exit 0, 12 of 12 Applications `Synced/Healthy`, the script initialised, unsealed and filled Vault without a
+manual step. Then the pod was deleted: the new one came back `Initialized true, Sealed true`;
+`vault-seed.ps1 -UnsealOnly` opened it; the three `ExternalSecret`s were `SecretSynced` again and the
+Grafana secret was still at version 1 with its original creation time, i.e. **the data survived and nothing
+was rewritten**.
+
+**What broke on the way (both in my own new code).**
+1. `vault operator unseal -` does not read stdin in this Vault (2.0.4): "'key' must be a valid hex or base64
+   string". Fixed with the stdin wrapper above.
+2. After a real init the `secret/` store did not exist: `kv put` failed with a 403 on the preflight check.
+   The script now enables it.
+
+**Not done.** One pod and one key share: a laptop shape. Production is three or five pods, a key split between
+people, and in AWS KMS auto-unseal. Nobody is paged while Vault is sealed except through
+`ExternalSecretNotReady` (section 33), which fires after 5 minutes.
