@@ -2021,7 +2021,7 @@ that does not parse). 15 rules now; `promtool` passes, the bot's coverage test p
 already showed the rejected reload; the query had hit a value from before the next scrape. Read again it
 was `0`, and the scrape interval (15 s) is the reason the alert has a `for`.
 
-## 32. Secrets from Vault: the script stopped creating them, and four things that broke on the way
+## 32. Secrets from Vault: the script stopped creating them, and five things that broke on the way
 
 **What was added.** In `deploy.ps1 -GitOps` the three Secrets (`grafana-admin`, `alertmanager-secrets`,
 `aiops-llm`) are no longer created by the script. Vault (dev mode, a pod in the cluster) and External
@@ -2048,7 +2048,7 @@ BotFather); no alert was firing, so nothing was sent with it, and the script put
 An honest limit of the data-loss test: the `ExternalSecret`s were already in error from an earlier,
 interrupted run, so the time at which External Secrets *notices* a lost Vault was not measured.
 
-**What broke on the way (all four were in my own new code).**
+**What broke on the way (all five were in my own new code).**
 
 1. **A byte order mark that only appeared in some consoles.** The first deploy died on "failed to parse
    policy: At 1:1: illegal char" - three invisible bytes (EF BB BF) at the start of what was piped into
@@ -2070,6 +2070,14 @@ interrupted run, so the time at which External Secrets *notices* a lost Vault wa
    for. The loop now uses it.
 4. **My test for the Vault restart was wrong the first time**: it took the old, still-terminating pod for
    the new one. It now waits for a new pod UID.
+5. **A second `deploy.ps1 -GitOps` on a live stand died.** The script still applied the `monitoring`
+   namespace manifest; Argo CD had already created that namespace without the last-applied annotation,
+   `kubectl` printed a warning, and PowerShell 5.1 made it a terminating error. A clean deploy never hits
+   it (the namespace does not exist yet). The step is skipped in GitOps mode, where the script creates no
+   Secret any more. The first re-run after the failure passed only because the failed one had added the
+   annotation, so the fix was tested properly by removing the annotation: the fixed script ran for one
+   minute, exit 0, no warning, namespace untouched, 12 of 12 Applications `Synced/Healthy`, the root
+   Application reading `main`.
 
 **Memory.** Measured: Argo CD 365 MiB, Vault 100, External Secrets 245 (three pods), the reload sidecars
 1-2 each: about 0.7 GB for GitOps and secrets together. The settled stand is ~6.5 GiB (sum of the node

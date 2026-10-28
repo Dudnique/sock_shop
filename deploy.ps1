@@ -429,7 +429,14 @@ if (-not $GitOps) {
 #     would silently lock us out of an instance that is already running.
 # The generated password is safe to embed in a URL (unlike a password made of
 # shell/URL metacharacters), which is why a plain UUID is used.
-kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-monitoring\00-monitoring-ns.yaml") | Out-Null
+# Not in GitOps mode: no Secret is created here any more (Vault and External
+# Secrets do it), and on a stand Argo CD already runs the namespace exists without
+# the last-applied annotation kubectl wants - it prints a warning, and under
+# $ErrorActionPreference = "Stop" Windows PowerShell 5.1 turns that line into a
+# terminating error, so a second `deploy.ps1 -GitOps` on a live stand died here.
+if (-not $GitOps) {
+    kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-monitoring\00-monitoring-ns.yaml") | Out-Null
+}
 
 if ($GitOps) {
     # The Secret is built by External Secrets from Vault; vault-seed.ps1 fills
