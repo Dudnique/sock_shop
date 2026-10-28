@@ -65,6 +65,17 @@ data:
       - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
         action: keep
         regex: true
+      # Skip addresses that are not Ready yet. `role: endpoints` also lists
+      # not-ready pods, and a JVM service takes up to 7 minutes to open its port
+      # (carts, shipping: readinessProbe initialDelaySeconds 420/360), so scraping
+      # it during startup made `up == 0` last longer than the 5m `for` of
+      # ScrapeTargetDown - a false alarm on every rollout and every replica the
+      # HPA adds. A pod that is Ready and still cannot be scraped keeps alerting;
+      # a Deployment that never becomes Ready is covered by
+      # DeploymentReplicasUnavailable, which is the rule that says so.
+      - source_labels: [__meta_kubernetes_endpoint_ready]
+        action: drop
+        regex: "false"
       - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scheme]
         action: replace
         target_label: __scheme__
@@ -115,6 +126,11 @@ data:
       - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
         action: keep
         regex: true
+      # Same reasoning as in kubernetes-service-endpoints: a pod that is still
+      # starting is not a scrape failure.
+      - source_labels: [__meta_kubernetes_pod_ready]
+        action: drop
+        regex: "false"
       - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
         action: replace
         target_label: __metrics_path__

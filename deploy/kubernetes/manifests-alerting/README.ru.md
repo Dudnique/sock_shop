@@ -30,13 +30,21 @@
           matchers: ['aiops="true"']
           continue: true          # два человеческих канала ниже всё равно сработают
         - receiver: 'telegram'
-          continue: true          # продолжить к следующему sibling
-        - receiver: 'slack'
+          matchers: ['severity="critical"']
+          continue: true          # critical доходит и до Slack ниже
+        - receiver: 'slack'       # без матчера: любой алерт, сюда попадают warning
 
 Маршрут бота закрыт матчером, поэтому до него доходят только правила, явно
-согласившиеся через `aiops: "true"`; у человеческих маршрутов матчера нет, и они
-совпадают со всем. Эта асимметрия и есть суть: автоматизация - это opt-in на
-уровне правила, а уведомление - нет.
+согласившиеся через `aiops: "true"`. Людей маршрутизирует severity: `critical`
+идёт в Telegram и Slack, `warning` - только в Slack. Раньше каждый алерт приходил
+в оба канала (и карточка бота сверху), из-за чего короткий `ScrapeTargetDown` или
+`ProbeSlow` рядом с `ProbeFailed` ощущались как спам.
+
+Одно правило `inhibit_rules` убирает настоящий дубль: пока для пробы горит
+`ProbeFailed`, `ProbeSlow` с тем же `instance` глушится - проба, ушедшая в
+таймаут, заодно и медленнее 2 с. Проверить маршрут, ничего не отправляя:
+
+    kubectl exec -n monitoring deploy/alertmanager -- amtool config routes test       --config.file=/etc/alertmanager/config.yml severity=warning aiops=true
 
 ## Маршрут triage-бота
 
@@ -52,7 +60,7 @@
 * **`send_resolved: false`.** Бот разбирает *сработавшие* инциденты; resolved-вебхук
   получает `200` и записывается как `skipped: resolved`, так что отправлять их -
   значит просто раздувать `aiops_alerts_skipped{reason="resolved"}`. Про
-  разрешение инцидента люди всё равно узнают из receiver'а `telegram`.
+  разрешение инцидента люди всё равно узнают из receiver'а `slack` (и `telegram` для critical).
 
 Если бот лежит, вебхук Alertmanager'а просто фейлится, и больше ничего не
 меняется: человеческие маршруты - независимые sibling'и. Бот, оказавшийся
