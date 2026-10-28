@@ -693,20 +693,22 @@ if ($GitOps) {
     if ($LASTEXITCODE -ne 0) { throw "applying the root Application failed (exit $LASTEXITCODE)" }
 
     # Vault is the first Application (wave -3) and External Secrets the second;
-    # everything else waits behind them. As soon as the Vault pod is Ready it is
-    # empty: fill it now, and the waves can proceed. Order matters: seeding any
-    # later would leave the ExternalSecrets failing and the waves stuck.
-    Write-Host "    Waiting for the Vault pod, then writing the secrets into it (deploy\vault-seed.ps1)..." -ForegroundColor Cyan
+    # everything else waits behind them. As soon as the Vault container runs, Vault
+    # is sealed and empty: vault-seed.ps1 initialises and unseals it (first start) or
+    # just unseals it, then fills it, and the waves can proceed. Order matters:
+    # seeding any later would leave the ExternalSecrets failing and the waves stuck.
+    # "Running", not "Ready": a sealed Vault is not guaranteed to pass its probe.
+    Write-Host "    Waiting for the Vault pod, then initialising, unsealing and filling it (deploy\vault-seed.ps1)..." -ForegroundColor Cyan
     $vaultDeadline = (Get-Date).AddMinutes(10)
     $vaultUp = $false
     while ((Get-Date) -lt $vaultDeadline) {
         $vp = Invoke-QuietProbe -Arguments @("-n", "vault", "get", "pod", "vault-0",
-            "-o", "jsonpath={.status.containerStatuses[0].ready}")
-        if ($vp.ExitCode -eq 0 -and "$($vp.Output)".Trim() -eq "true") { $vaultUp = $true; break }
+            "-o", "jsonpath={.status.containerStatuses[0].state.running.startedAt}")
+        if ($vp.ExitCode -eq 0 -and "$($vp.Output)".Trim()) { $vaultUp = $true; break }
         Start-Sleep -Seconds 5
     }
     if (-not $vaultUp) {
-        throw "Vault did not become Ready within 10 minutes. See: kubectl -n argocd get application vault"
+        throw "The Vault container did not start within 10 minutes. See: kubectl -n argocd get application vault"
     }
     $grafanaPassword = & (Join-Path $PSScriptRoot "deploy\vault-seed.ps1") | Select-Object -Last 1
 
@@ -785,6 +787,6 @@ if ($GitOps) {
     Write-Host  "              kubectl port-forward -n argocd svc/argocd-server 8090:80  ->  http://localhost:8090"
     Write-Host ("    Argo CD admin password (argocd-initial-admin-secret): {0}" -f $argoPassword) -ForegroundColor Yellow
     Write-Host  "  Vault       kubectl port-forward -n vault svc/vault 8200:8200  ->  http://localhost:8200"
-    Write-Host  "              dev mode: login with the token 'root'; the secrets are under secret/sock-shop"
-    Write-Host  "              (dev mode forgets everything on a restart: run deploy\vault-seed.ps1 again)"
+    Write-Host  "              login with the root token in deploy\vault-init.local.json (git-ignored); secrets: secret/sock-shop"
+    Write-Host  "              the data survives a restart but Vault comes back sealed: run deploy\vault-seed.ps1 -UnsealOnly"
 }

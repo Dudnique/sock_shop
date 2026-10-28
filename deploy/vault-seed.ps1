@@ -6,22 +6,28 @@
 # is the one place that writes them, from the same local, git-ignored file as
 # before (deploy\secrets.local.ps1) or from the environment variables.
 #
-# Vault runs in the cluster, in DEV MODE: it keeps everything in memory, so a
-# restart of its pod (Docker Desktop restarted, the node rebooted) empties it.
-# The Secrets that are already in the cluster stay (External Secrets retains
-# them), but nothing refreshes them until this script runs again. It is safe to
-# run any number of times:
+# Vault runs in the cluster with its data on a volume (Raft storage), so the data
+# survives a restart of its pod. What does not survive is the "unsealed" state:
+# Vault starts sealed (locked) and gives nothing out until it is unsealed with a
+# key. This script handles all of it and is safe to run any number of times:
 #
-#     .\deploy\vault-seed.ps1
+#     .\deploy\vault-seed.ps1               # everything below
+#     .\deploy\vault-seed.ps1 -UnsealOnly   # after a restart: just unlock, keep the data
 #
 # What it does, in order:
+#   0. first start only: initialises Vault (it generates one unseal key and a root
+#      token) and saves both to deploy\vault-init.local.json, which is git-ignored.
+#      Then unseals it if it is sealed. If the cluster was rebuilt (the volume is
+#      gone, the key file is stale) the old file is moved aside and Vault is
+#      initialised afresh;
 #   1. enables the Kubernetes auth method and tells Vault where the API is;
 #   2. writes a read-only policy for secret/sock-shop/* and a role that binds it
 #      to the External Secrets ServiceAccount - so no token is stored anywhere;
 #   3. writes the values to secret/sock-shop/{grafana,alerting,aiops}.
-# Values travel through stdin, never as command-line arguments (those show up in
-# process lists). Nothing secret is printed. The Grafana admin password is the
-# one thing returned (as the last output), because deploy.ps1 prints it once.
+# Secrets travel through stdin, never as command-line arguments (those show up in
+# process lists) - the root token included. Nothing secret is printed. The Grafana
+# admin password is the one thing returned (as the last output), because
+# deploy.ps1 prints it once.
 #
 # NOTE: ASCII-only on purpose, like deploy.ps1 (Windows PowerShell 5.1 decodes a
 # UTF-8-without-BOM script as the ANSI codepage and mangles anything else).
@@ -29,7 +35,8 @@
 [CmdletBinding()]
 param(
     [string]$Namespace = "vault",
-    [string]$Pod = "vault-0"
+    [string]$Pod = "vault-0",
+    [switch]$UnsealOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,9 +44,10 @@ $ErrorActionPreference = "Stop"
 $secretsFile = Join-Path $PSScriptRoot "secrets.local.ps1"
 if (Test-Path $secretsFile) { . $secretsFile }
 
-# The dev-mode root token is not a secret (the Helm values in git set it, and dev
-# mode prints it in its own log); it only exists to configure a throw-away Vault.
-$rootToken = "root"
+# Written at the first start, never committed (see .gitignore): the unseal key and
+# the root token of this Vault. Whoever holds this file owns the Vault.
+$initFile = Join-Path $PSScriptRoot "vault-init.local.json"
+$script:RootToken = $null
 
 # Runs `vault <args>` inside the Vault pod and returns its stdout.
 #
@@ -55,13 +63,28 @@ $rootToken = "root"
 #     input encoding is switched to BOM-less UTF-8 just for the Process.Start call.
 # Bash sends neither, which is why the same command worked there. A process also
 # gives the real stderr, so a failure says why instead of "exit 2".
+#
+# The root token is not put on the command line (kubectl's arguments are visible in
+# the process list): it is the first line of stdin, and a tiny `sh` wrapper inside
+# the pod reads it into VAULT_TOKEN before running vault. The rest of stdin is
+# left for vault itself (`policy write ... -`, `kv put ... -`). -NoToken is for the
+# calls made before a token exists (status, init, unseal).
 $script:VaultExit = 0
 function Invoke-Vault {
-    param([string[]]$VaultArgs, [string]$Stdin, [switch]$AllowFailure)
-    $hasStdin = $PSBoundParameters.ContainsKey("Stdin")
+    param([string[]]$VaultArgs, [string]$Stdin, [switch]$AllowFailure, [switch]$NoToken)
+    $withToken = (-not $NoToken) -and $script:RootToken
+    if ($withToken) {
+        $Stdin = $script:RootToken + "`n" + $(if ($PSBoundParameters.ContainsKey("Stdin")) { $Stdin } else { "" })
+    }
+    $hasStdin = $withToken -or $PSBoundParameters.ContainsKey("Stdin")
     $all = @("-n", $Namespace, "exec")
     if ($hasStdin) { $all += "-i" }
-    $all += @("-c", "vault", $Pod, "--", "env", "VAULT_TOKEN=$rootToken", "vault") + $VaultArgs
+    if ($withToken) {
+        $all += @("-c", "vault", $Pod, "--", "sh", "-c",
+            'IFS= read -r VAULT_TOKEN; export VAULT_TOKEN; exec vault "$@"', "sh") + $VaultArgs
+    } else {
+        $all += @("-c", "vault", $Pod, "--", "vault") + $VaultArgs
+    }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "kubectl"
@@ -98,6 +121,58 @@ function Invoke-Vault {
 }
 
 Write-Host "==> Seeding Vault ($Namespace/$Pod)" -ForegroundColor Cyan
+
+# --- 0. Initialise (first start) and unseal ----------------------------------
+# `vault status` exits 0 when unsealed, 2 when sealed or not initialised, 1 on error;
+# the JSON is on stdout in the first two cases.
+function Get-VaultStatus {
+    $deadline = (Get-Date).AddMinutes(3)
+    while ($true) {
+        $raw = Invoke-Vault -VaultArgs @("status", "-format=json") -NoToken -AllowFailure
+        if ($script:VaultExit -in 0, 2 -and $raw.Trim()) { return ($raw | ConvertFrom-Json) }
+        if ((Get-Date) -gt $deadline) { throw "Vault does not answer in $Namespace/$Pod (is the pod running?)" }
+        Start-Sleep -Seconds 3
+    }
+}
+
+$status = Get-VaultStatus
+if (-not $status.initialized) {
+    if (Test-Path $initFile) {
+        # The cluster was rebuilt: the volume is new and empty, the file is from the old one.
+        $aside = $initFile + ".stale-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+        Move-Item $initFile $aside
+        Write-Host "    Vault is new but a key file from an old cluster exists: moved to $(Split-Path $aside -Leaf)." -ForegroundColor Yellow
+    }
+    $initJson = Invoke-Vault -VaultArgs @("operator", "init", "-key-shares=1", "-key-threshold=1", "-format=json") -NoToken
+    # Saved before anything else: this output is the only copy of the key.
+    [System.IO.File]::WriteAllText($initFile, $initJson, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "    Vault initialised. Unseal key and root token saved to deploy\vault-init.local.json (git-ignored: keep a copy, losing it loses the data)." -ForegroundColor Yellow
+    $status = Get-VaultStatus
+}
+if (-not (Test-Path $initFile)) {
+    throw ("Vault is initialised but $initFile is missing, so there is no key to unseal it with. " +
+           "If the data does not matter, delete the volume: kubectl -n $Namespace delete pvc --all; " +
+           "kubectl -n $Namespace delete pod $Pod  - and run this script again.")
+}
+$init = Get-Content $initFile -Raw | ConvertFrom-Json
+$script:RootToken = $init.root_token
+if ($status.sealed) {
+    Invoke-Vault -VaultArgs @("operator", "unseal", "-") -Stdin $init.unseal_keys_b64[0] -NoToken | Out-Null
+    Write-Host "    Vault unsealed."
+}
+# After the unseal a single Raft node needs a few seconds to elect itself leader;
+# until then writes answer "Vault is sealed" or "no active node".
+$deadline = (Get-Date).AddMinutes(2)
+while ($true) {
+    Invoke-Vault -VaultArgs @("auth", "list", "-format=json") -AllowFailure | Out-Null
+    if ($script:VaultExit -eq 0) { break }
+    if ((Get-Date) -gt $deadline) { throw "Vault was unsealed but did not become active within 2 minutes" }
+    Start-Sleep -Seconds 3
+}
+if ($UnsealOnly) {
+    Write-Host "    Unsealed; data kept (-UnsealOnly): nothing was rewritten." -ForegroundColor Green
+    return
+}
 
 # --- 1. Kubernetes auth ------------------------------------------------------
 $auth = Invoke-Vault -VaultArgs @("auth", "list", "-format=json")

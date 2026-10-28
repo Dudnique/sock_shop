@@ -33,15 +33,32 @@ apps:
       name: vault
       version: 0.34.1
       values:
-        # DEV MODE: one pod, unsealed, in-memory storage, a fixed root token.
-        # Everything stored in it is gone when the pod restarts, which is fine for
-        # a stand whose secrets are re-seeded from deploy/secrets.local.ps1 by
-        # deploy/vault-seed.ps1, and wrong for anything else (a real Vault is HA
-        # Raft storage with auto-unseal; see manifests-secrets/README.md).
+        # A real (not dev-mode) Vault: one pod, data on a 1 Gi volume (Raft, Vault's
+        # built-in storage), sealed after every start. There is no fixed root token:
+        # deploy/vault-seed.ps1 initialises it once and keeps the unseal key and the
+        # generated root token in deploy/vault-init.local.json (git-ignored), and
+        # unseals it again after a restart. One key share because this is one pod on
+        # a laptop; in AWS the key is held by KMS (auto-unseal) and nobody unseals by hand.
         server:
           dev:
+            enabled: false
+          standalone:
             enabled: true
-            devRootToken: root
+            config: |
+              ui = true
+              disable_mlock = true
+              listener "tcp" {
+                tls_disable = 1
+                address = "[::]:8200"
+                cluster_address = "[::]:8201"
+              }
+              storage "raft" {
+                path = "/vault/data"
+              }
+              service_registration "kubernetes" {}
+          dataStorage:
+            enabled: true
+            size: 1Gi
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 256Mi}
