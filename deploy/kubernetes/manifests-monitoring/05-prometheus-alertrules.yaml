@@ -236,3 +236,22 @@ data:
           summary: "{{ $labels.kubernetes_name }} rejected its new configuration"
           description: "The last config reload failed, so the previous configuration is still running and the change that was just synced is NOT live."
           runbook: "kubectl -n monitoring logs deploy/{{ $labels.kubernetes_name }} -c {{ $labels.kubernetes_name }} --tail=20"
+      - alert: ExternalSecretNotReady
+        # GitOps mode only (deploy.ps1 -GitOps): the Secrets come from Vault through
+        # External Secrets. When that stops working - Vault restarted and is empty or
+        # sealed, the role is gone - the Secrets already in the cluster keep working
+        # (deletionPolicy: Retain), so nothing breaks and nothing says so: they just
+        # stop being refreshed, and a rotated token never arrives. External Secrets
+        # exports one series per ExternalSecret; `status="False"` is the failing state.
+        # On the plain path there is no External Secrets, the series does not exist and
+        # this rule stays silent - it costs nothing there.
+        expr: externalsecret_status_condition{condition="Ready",status="False"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          namespace: monitoring
+          aiops: "true"
+        annotations:
+          summary: "ExternalSecret {{ $labels.namespace }}/{{ $labels.name }} is not syncing"
+          description: "The Secret is not being refreshed from Vault. It still holds its last good value, so nothing is broken yet, but a rotated value will not arrive. Usual cause: Vault was restarted (sealed or empty)."
+          runbook: "kubectl -n {{ $labels.namespace }} describe externalsecret {{ $labels.name }}; kubectl get clustersecretstore vault; .\\deploy\\vault-seed.ps1"
