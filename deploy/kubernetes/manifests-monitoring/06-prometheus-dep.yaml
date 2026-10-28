@@ -35,6 +35,32 @@ spec:
           mountPath: /etc/prometheus
         - name: alertrules-volume
           mountPath: /etc/prometheus-rules
+      # Prometheus reads its config and rule files once, at start. A ConfigMap
+      # change (a rule edited in git and synced by Argo CD, or `kubectl apply`)
+      # reaches the files in the pod within about a minute, but the process keeps
+      # the old rules until it is told to re-read them - the classic "I changed
+      # the rule and nothing happened". This sidecar watches both directories and
+      # sends POST /-/reload (the server runs with --web.enable-lifecycle) when
+      # they change. A rule file that does not parse is rejected by that reload and
+      # Prometheus keeps the previous, working rules: a bad edit does not silence
+      # the alerts. deploy.ps1 still reloads by hand on the plain path; both are
+      # harmless together.
+      - name: config-reloader
+        image: ghcr.io/jimmidyson/configmap-reload:v0.14.0
+        args:
+        - '--volume-dir=/etc/prometheus'
+        - '--volume-dir=/etc/prometheus-rules'
+        - '--webhook-url=http://127.0.0.1:9090/-/reload'
+        resources:
+          requests: {cpu: 5m, memory: 8Mi}
+          limits: {memory: 32Mi}
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/prometheus
+          readOnly: true
+        - name: alertrules-volume
+          mountPath: /etc/prometheus-rules
+          readOnly: true
       volumes:
       - name: config-volume
         configMap:

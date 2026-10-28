@@ -219,3 +219,20 @@ data:
         annotations:
           summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
           description: "A target has been down for 5m; its metrics are missing, so other alerts cannot fire either."
+      - alert: ConfigReloadFailed
+        # Prometheus and Alertmanager now re-read their config by themselves (the
+        # config-reloader sidecars). A config or a rule file that does not parse is
+        # REJECTED and the previous one keeps running - good, a bad edit does not
+        # silence the alerts - but it also means the change in git is not live, and
+        # nothing says so. Both servers export the outcome of the last reload.
+        # `or` because either server alone is enough.
+        expr: (prometheus_config_last_reload_successful == 0) or (alertmanager_config_last_reload_successful == 0)
+        for: 2m
+        labels:
+          severity: warning
+          namespace: monitoring
+          aiops: "true"
+        annotations:
+          summary: "{{ $labels.kubernetes_name }} rejected its new configuration"
+          description: "The last config reload failed, so the previous configuration is still running and the change that was just synced is NOT live."
+          runbook: "kubectl -n monitoring logs deploy/{{ $labels.kubernetes_name }} -c {{ $labels.kubernetes_name }} --tail=20"

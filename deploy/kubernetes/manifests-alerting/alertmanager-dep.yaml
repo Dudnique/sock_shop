@@ -49,6 +49,27 @@ spec:
               readOnly: true
             - name: storage
               mountPath: /alertmanager
+        # Re-reads the config when the ConfigMap changes (a route or a receiver
+        # edited in git) and when the Secret changes (a token rotated in Vault and
+        # synced by External Secrets): Alertmanager loads both only at start or on
+        # POST /-/reload. A config it cannot parse is rejected and the running one
+        # stays.
+        - name: config-reloader
+          image: ghcr.io/jimmidyson/configmap-reload:v0.14.0
+          args:
+            - '--volume-dir=/etc/alertmanager'
+            - '--volume-dir=/etc/alertmanager-secrets'
+            - '--webhook-url=http://127.0.0.1:9093/-/reload'
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {memory: 32Mi}
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/alertmanager
+              readOnly: true
+            - name: secrets
+              mountPath: /etc/alertmanager-secrets
+              readOnly: true
       volumes:
         - name: config-volume
           configMap:

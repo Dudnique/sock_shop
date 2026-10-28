@@ -1987,3 +1987,36 @@ panels, as on every cold stand (5 of 92 empty); after about ten minutes of load 
 **92 queries, 0 empty**, the same as on the other two paths. Under load the `sock-shop`
 Application shows `Progressing` while the HPA-added replicas wait for their readiness probes,
 so the root is not always green on a stand that is being loaded; that is the autoscaler, not a fault.
+
+## 31. A rule changed in git that never went live: the reload sidecars, and the alert for a reload that fails
+
+**The gap section 30 left.** Prometheus and Alertmanager read their config once, at start. Argo CD
+updates the ConfigMap and the file inside the pod follows within about a minute, but the process keeps
+the old rules until it is told to re-read them (`POST /-/reload`). `deploy.ps1` does that by hand on the
+plain path; in GitOps mode nobody did, so a rule fixed in git would have looked synced and green while
+the old rule kept running.
+
+**Fix.** A sidecar `ghcr.io/jimmidyson/configmap-reload:v0.14.0` (about 5 MB, 8 Mi requested) in both
+pods watches the config directories and calls the reload URL when they change. Prometheus watches its
+config and its rules; Alertmanager watches its config **and its secrets directory**, so a token rotated
+in Vault (section 32) is picked up without a restart.
+
+**Measured on the live stand:**
+
+| Change | Result |
+| ------ | ------ |
+| a throw-away alert group added to the rules ConfigMap | live in Prometheus after 63 s, nobody called `/-/reload` |
+| a malformed rule (`expr: vector(`) | reload rejected with HTTP 500, `prometheus_config_last_reload_successful` = 0, the **previous rules stayed loaded** (log: "error loading rules, previous rule set restored"); the broken one never appeared |
+| the ConfigMap restored | Prometheus recovered by itself, metric back to 1, the original four groups |
+| a comment added to the Alertmanager config | reloaded after 21 s |
+| the malformed rule left in place | `ConfigReloadFailed` firing after 301 s (ConfigMap delivery + the 2-minute `for` + a scrape), received by Alertmanager (held back by a test silence, so nothing reached Slack or Telegram), resolved 125 s after the ConfigMap was restored |
+
+A bad edit therefore cannot silence the alerts - but it also does not apply, and nothing said so. That
+is the new rule **`ConfigReloadFailed`** (`prometheus_config_last_reload_successful == 0` or
+`alertmanager_config_last_reload_successful == 0`, for 2 minutes, warning, in the `meta` group; the
+bot's tier-0 table answers it with `escalate_human`, because restarting a server does not fix a config
+that does not parse). 15 rules now; `promtool` passes, the bot's coverage test passes, 163 tests.
+
+**An honest correction while testing.** My first reading of the metric came back `1` while the log
+already showed the rejected reload; the query had hit a value from before the next scrape. Read again it
+was `0`, and the scrape interval (15 s) is the reason the alert has a `for`.
