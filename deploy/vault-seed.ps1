@@ -43,13 +43,18 @@ $rootToken = "root"
 
 # Runs `vault <args>` inside the Vault pod and returns its stdout.
 #
-# kubectl is started as a process and its stdin is written as raw UTF-8 BYTES, not
-# through the PowerShell pipeline. Windows PowerShell 5.1 prepends a byte order
-# mark (EF BB BF) and appends a stray line break to text piped into a native
-# command, whatever $OutputEncoding says - Vault then reads three invisible bytes
-# at the start of the policy and answers "failed to parse policy: At 1:1: illegal
-# char". (Bash sends none, which is why the same command worked there.) A process
-# also gives the real stderr, so a failure says why instead of "exit 2".
+# Two Windows PowerShell 5.1 traps, both ending in Vault's "failed to parse policy:
+# At 1:1: illegal char" (three invisible bytes, EF BB BF, at the start of stdin):
+#  1. text piped into a native command gets a byte order mark and a stray line
+#     break, whatever $OutputEncoding says - so kubectl is started as a process and
+#     its stdin is written as raw UTF-8 bytes;
+#  2. .NET builds the redirected stdin stream with the CONSOLE's input encoding and
+#     flushes it at once, which writes a BOM when the console code page is UTF-8
+#     (65001; plain cmd.exe and most terminals use 437 or 866, which is why the
+#     same script worked in one window and failed in another) - so the console
+#     input encoding is switched to BOM-less UTF-8 just for the Process.Start call.
+# Bash sends neither, which is why the same command worked there. A process also
+# gives the real stderr, so a failure says why instead of "exit 2".
 $script:VaultExit = 0
 function Invoke-Vault {
     param([string[]]$VaultArgs, [string]$Stdin, [switch]$AllowFailure)
@@ -68,7 +73,13 @@ function Invoke-Vault {
     $psi.RedirectStandardError = $true
     $psi.RedirectStandardInput = $hasStdin
 
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    $previousInput = [Console]::InputEncoding
+    try {
+        [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    } finally {
+        [Console]::InputEncoding = $previousInput
+    }
     if ($hasStdin) {
         # Bytes straight into the stream: no encoder in between, so no byte order mark.
         $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(($Stdin -replace "`r`n", "`n"))
