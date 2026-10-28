@@ -32,52 +32,65 @@ param(
     [string]$Pod = "vault-0"
 )
 
-# Not "Stop": Windows PowerShell 5.1 turns one byte of stderr from a native
-# command into a terminating error. Exit codes are checked explicitly instead.
-$ErrorActionPreference = "Continue"
-
-# What is piped into a native command is encoded with $OutputEncoding, and on
-# Windows PowerShell 5.1 that is UTF-8 WITH a byte order mark: Vault then reads
-# three invisible bytes at the start of the policy and answers "failed to parse
-# policy: At 1:1: illegal char". Bash sends no BOM, which is why the same command
-# worked there. Plain UTF-8 for everything this script pipes.
-$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$ErrorActionPreference = "Stop"
 
 $secretsFile = Join-Path $PSScriptRoot "secrets.local.ps1"
 if (Test-Path $secretsFile) { . $secretsFile }
 
-# The dev-mode root token is not a secret (dev mode prints it in its own log and
-# the Helm values in git set it); it only exists to configure a throw-away Vault.
+# The dev-mode root token is not a secret (the Helm values in git set it, and dev
+# mode prints it in its own log); it only exists to configure a throw-away Vault.
 $rootToken = "root"
 
-# Runs `vault <args>` inside the Vault pod. $Stdin, when given, is piped in.
+# Runs `vault <args>` inside the Vault pod and returns its stdout.
+#
+# kubectl is started as a process and its stdin is written as raw UTF-8 BYTES, not
+# through the PowerShell pipeline. Windows PowerShell 5.1 prepends a byte order
+# mark (EF BB BF) and appends a stray line break to text piped into a native
+# command, whatever $OutputEncoding says - Vault then reads three invisible bytes
+# at the start of the policy and answers "failed to parse policy: At 1:1: illegal
+# char". (Bash sends none, which is why the same command worked there.) A process
+# also gives the real stderr, so a failure says why instead of "exit 2".
+$script:VaultExit = 0
 function Invoke-Vault {
     param([string[]]$VaultArgs, [string]$Stdin, [switch]$AllowFailure)
-    $base = @("-n", $Namespace, "exec")
-    if ($PSBoundParameters.ContainsKey("Stdin")) { $base += "-i" }
-    $base += @("-c", "vault", $Pod, "--", "env", "VAULT_TOKEN=$rootToken", "vault") + $VaultArgs
-    if ($PSBoundParameters.ContainsKey("Stdin")) {
-        $out = $Stdin | & kubectl @base 2>$null
-    } else {
-        $out = & kubectl @base 2>$null
+    $hasStdin = $PSBoundParameters.ContainsKey("Stdin")
+    $all = @("-n", $Namespace, "exec")
+    if ($hasStdin) { $all += "-i" }
+    $all += @("-c", "vault", $Pod, "--", "env", "VAULT_TOKEN=$rootToken", "vault") + $VaultArgs
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "kubectl"
+    $psi.Arguments = (($all | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }) -join " ")
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $hasStdin
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if ($hasStdin) {
+        # Bytes straight into the stream: no encoder in between, so no byte order mark.
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(($Stdin -replace "`r`n", "`n"))
+        $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+        $proc.StandardInput.BaseStream.Flush()
+        $proc.StandardInput.Close()
     }
-    if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) {
-        throw "vault $($VaultArgs[0..1] -join ' ') failed (exit $LASTEXITCODE) - is the pod $Pod in namespace $Namespace Ready?"
+    $out = $proc.StandardOutput.ReadToEnd()
+    $err = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    $script:VaultExit = $proc.ExitCode
+    if ($proc.ExitCode -ne 0 -and -not $AllowFailure) {
+        throw ("vault " + ($VaultArgs[0..1] -join " ") + " failed (exit " + $proc.ExitCode + "): " + $err.Trim())
     }
     return $out
-}
-
-function ConvertTo-JsonLine {
-    param([hashtable]$Data)
-    # ConvertTo-Json on 5.1 is fine for flat string maps; -Compress keeps it on one line.
-    return ($Data | ConvertTo-Json -Compress)
 }
 
 Write-Host "==> Seeding Vault ($Namespace/$Pod)" -ForegroundColor Cyan
 
 # --- 1. Kubernetes auth ------------------------------------------------------
 $auth = Invoke-Vault -VaultArgs @("auth", "list", "-format=json")
-if (-not (($auth | Out-String) -match '"kubernetes/"')) {
+if ($auth -notmatch '"kubernetes/"') {
     Invoke-Vault -VaultArgs @("auth", "enable", "kubernetes") | Out-Null
     Write-Host "    Kubernetes auth method enabled."
 }
@@ -113,8 +126,8 @@ $generated = $false
 if (-not $grafanaPassword) {
     $existing = Invoke-Vault -VaultArgs @("kv", "get", "-mount=secret", "-field=admin-password",
         "sock-shop/grafana") -AllowFailure
-    if ($LASTEXITCODE -eq 0 -and $existing) {
-        $grafanaPassword = ($existing | Out-String).Trim()
+    if ($script:VaultExit -eq 0 -and $existing.Trim()) {
+        $grafanaPassword = $existing.Trim()
         Write-Host "    Reusing the Grafana admin password already in Vault."
     } else {
         $grafanaPassword = [Guid]::NewGuid().ToString("N")
@@ -127,17 +140,18 @@ if (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:SLACK_WEBHOOK_URL) {
            "(git-ignored; see README, section Secrets) or in the environment.")
 }
 
+# Flat string maps; ConvertTo-Json -Compress keeps each on one line.
 Invoke-Vault -VaultArgs @("kv", "put", "-mount=secret", "sock-shop/grafana", "-") -Stdin (
-    ConvertTo-JsonLine @{ "admin-user" = $grafanaUser; "admin-password" = $grafanaPassword }) | Out-Null
+    @{ "admin-user" = $grafanaUser; "admin-password" = $grafanaPassword } | ConvertTo-Json -Compress) | Out-Null
 Invoke-Vault -VaultArgs @("kv", "put", "-mount=secret", "sock-shop/alerting", "-") -Stdin (
-    ConvertTo-JsonLine @{ "telegram_bot_token" = $env:TELEGRAM_BOT_TOKEN
-                          "slack_webhook_url" = $env:SLACK_WEBHOOK_URL }) | Out-Null
+    @{ "telegram_bot_token" = $env:TELEGRAM_BOT_TOKEN
+       "slack_webhook_url" = $env:SLACK_WEBHOOK_URL } | ConvertTo-Json -Compress) | Out-Null
 
 # The model key is optional: an empty string means "no model", and the bot falls
 # back to its ruleset and says so on every card.
 $deepseek = if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } else { "" }
 Invoke-Vault -VaultArgs @("kv", "put", "-mount=secret", "sock-shop/aiops", "-") -Stdin (
-    ConvertTo-JsonLine @{ "deepseek_api_key" = $deepseek }) | Out-Null
+    @{ "deepseek_api_key" = $deepseek } | ConvertTo-Json -Compress) | Out-Null
 $modelNote = if ($deepseek) { "model key present" } else { "no model key: the bot runs on its ruleset" }
 Write-Host "    Values written: sock-shop/grafana, sock-shop/alerting, sock-shop/aiops ($modelNote)." -ForegroundColor Green
 
