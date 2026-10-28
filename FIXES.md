@@ -1877,4 +1877,67 @@ perfectly healthy, and the rules still proposed the restart at 0.80: the check "
 true" exists only for `DeploymentReplicasUnavailable`. `PodCrashLooping` and `PodRestartFlapping` are
 taken at their word. It is an advisor today, so a human sees the card first, but the context does not
 yet tell "the query returned nothing" from "the query failed", and that distinction is what a safe
-premise check needs (TODO, section 2).
+premise check needs (TODO, section 2). **Corrected in section 29:** the real rules send no
+`deployment` label, so this case was reachable only with a hand-made alert.
+
+## 29. The bot that could not propose anything for a pod, and a premise check that asked the wrong moment
+
+**A correction to section 28.** Section 28 says the rules proposed a restart for a healthy
+`catalogue` at 0.80. That was true for a test alert I had given a `deployment` label by hand. The
+shipped `PodCrashLooping` and `PodRestartFlapping` rules send `pod` and `container` and no
+`deployment`; re-run with exactly those labels, the bot escalated with "no deployment label". So the
+real defect was the opposite one: for the most common kind of incident the bot could not propose
+anything at all, and the premise check I had written down as missing could not even be reached.
+
+**Fix, in two steps.**
+1. `resolve_deployment()` in `triage_bot/context.py` finds the Deployment through
+   `kube_pod_owner` and `kube_replicaset_owner` (both present on this stand) instead of parsing the
+   pod name, and puts it into the context as the first fact of the card. The pod name is validated
+   against DNS-1123 before it is placed in a PromQL string.
+2. `MockAdapter.POD_PREMISES` re-checks the two pod alerts against live series before any action:
+   `PodCrashLooping` needs `CrashLoopBackOff` in the last 5 minutes, `PodRestartFlapping` needs more
+   than 3 restarts in 15 minutes (the number is read from the rule file by a test, so the two cannot
+   drift). To make that safe the context now keeps "the query answered with no series" (evidence
+   against the alert) apart from "the query failed" (no evidence, does not block).
+
+**What the live run found that the unit tests could not.** The first version asked "is the pod in
+`CrashLoopBackOff` right now" and refused a pod that was crash-looping: at two minutes of age the
+container leaves the waiting state for a moment on every attempt, and the instant query landed in
+that moment (`kube_pod_container_status_waiting` was 0, the pod was in `Error`). The unit tests were
+green, because they feed the adapter the answer they expect. The look-back of 5 minutes fixed it.
+The rule itself waits 10 minutes, where the back-off is at its 5-minute cap and the window is
+rarely missed, so this would have shown up as an occasional wrong refusal, which errs on the safe
+side; it is still wrong, and now it is covered.
+
+**Result, live (a Deployment that really crash-loops, and a healthy one):**
+
+| Alert | Pod | Tier 0 |
+| ----- | --- | ------ |
+| `PodCrashLooping` | crash-looping `crashy` | `restart_deployment`, `kubectl -n sock-shop rollout restart deployment/crashy` |
+| `PodRestartFlapping` | crash-looping `crashy` | `restart_deployment` for the same Deployment |
+| `PodCrashLooping` | healthy `catalogue` | `escalate_human`: no container of the pod is in a waiting state |
+| `PodRestartFlapping` | healthy `catalogue` | `escalate_human`: `pod_restarts_15m = 0`, the rule needs more than 3 |
+
+**"No log lines" that read like a broken Loki.** The cards for a crash-looping pod said
+`gap: loki: no log lines in the window`, and it looked as if Loki had stopped. It had not: the
+namespace held 500 lines in the same 15 minutes. The pod ran `sh -c "exit 1"` and printed nothing,
+and `front-end` was quiet because the load test had been stopped. `context._silent_workload_gap()`
+now asks Loki for any line of the namespace in the window and says which case it is: "Loki itself
+answers, so the workload wrote nothing", or "no lines for the whole namespace - check promtail and
+Loki". If that probe itself fails, the old wording stays. Checked live without sending anything to
+Telegram (collect_context against port-forwarded Prometheus and Loki): `front-end` -> the first
+wording, `catalogue` -> 20 lines. Tests: 158.
+
+**The model answer with no `evidence`.** Section 28's check of the model tier produced one
+rejected answer in eight (`schema: missing required keys: ['evidence']`): `escalate_human` without
+the list. The validator did its job, but the incident reached a human with none of the model's
+analysis. The system prompt now states that every answer carries all four keys, and a malformed
+answer (`schema`, `not_json`) is retried once with the validator's own message; a forbidden action
+(`bad_params`, outside the whitelist) and the deterministic tier 0 are never retried, and the retry
+goes through the same validator. New counter `aiops_schema_retries{adapter}`. Tests: 163 (was 158),
+including "a second bad answer is not retried again" and "a forbidden action is never retried". Not
+verified live: the model cannot be made to produce a malformed answer on demand, so the retry is
+covered by the unit tests only; the first live retries will show up in `aiops_schema_retries`.
+
+Tests: 156 (was 136), all standard library. Not covered: a pod whose owner is not a Deployment (a
+Job, a StatefulSet) is reported as a named gap and escalates; there is no tier-0 action for it.

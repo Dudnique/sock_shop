@@ -149,8 +149,8 @@ is meant to be computed from (`replicas_available` vs `replicas_desired`), and a
 contradiction turns the answer into an escalation that carries **both numbers**:
 
     Алерт DeploymentReplicasUnavailable не подтверждается метриками
-    (replicas_available=1 >= replicas_desired=1): состояние уже соответствует
-    желаемому, автоматический шаг ничего не исправит - решение за человеком.
+    (replicas_available=1 >= replicas_desired=1): того, на что указывает алерт,
+    сейчас не видно, автоматический шаг ничего не исправит - решение за человеком.
 
 The asymmetry is deliberate and is the whole policy: only a **contradiction**
 stops the bot. A **missing** metric is not a conflict - silence must not block a
@@ -171,6 +171,56 @@ already held `replicas_desired[front-end]=0`; `context._is_scaled_to_zero()` now
 reads it, and the card says `loki: no pods - the deployment is scaled to 0
 (desired=0), so there is nothing to log`. An unknown number keeps the old wording,
 because silence must not be turned into a diagnosis either.
+
+**5. Pod alerts never reached a Deployment.** `PodCrashLooping` and `PodRestartFlapping`
+carry `pod` and `container` and no `deployment`, so tier 0 stopped at "no deployment
+label" and handed every such alert to a human - the bot could not propose anything for
+the most common kind of incident. (An earlier version of these notes said the opposite:
+that tier 0 proposed a restart for a healthy pod. It did, but only for a test alert to
+which a `deployment` label had been added by hand; the shipped rule never sends one.)
+`context.resolve_deployment()` now asks kube-state-metrics for the owner chain,
+`kube_pod_owner` -> ReplicaSet -> `kube_replicaset_owner` -> Deployment, instead of
+guessing it from the pod name, and the card states it as its first fact
+(`deployment_of_pod[...] = catalogue`). A pod name from an alert is checked against
+the DNS-1123 pattern before it goes into a PromQL string.
+
+**6. Once the Deployment is known, the alert is re-checked** (`MockAdapter.POD_PREMISES`):
+
+| Alert | The premise it must still satisfy | Query |
+| ----- | --------------------------------- | ----- |
+| `PodCrashLooping` | the pod was in `CrashLoopBackOff` in the last 5 minutes | `max_over_time(kube_pod_container_status_waiting_reason[5m])` |
+| `PodRestartFlapping` | more than 3 restarts in 15 minutes (the rule's own number; `tests/test_coverage.py` fails if they differ) | `increase(kube_pod_container_status_restarts_total[15m])` |
+
+The check needed one change in the context: it now records which queries **answered
+with no series** (`context["empty"]`) separately from the ones that **failed**
+(`context["missing"]`). An empty answer is evidence - "this pod is not waiting" - and
+refuses the action; a failed query is no evidence and, as before, does not block it.
+The first version asked "is it waiting right now?" and was wrong on a live 2-minute-old
+crash-looping pod: a container leaves the waiting state for a moment on every attempt,
+and the instant query landed in that moment. The 5-minute look-back fixed it.
+
+Verified on the live stand with a Deployment that really crash-loops: `PodCrashLooping`
+and `PodRestartFlapping` on that pod -> `restart_deployment` for the resolved
+Deployment; the same two alerts on a healthy `catalogue` pod -> `escalate_human`
+("no container of the pod is in a waiting state" / "pod_restarts_15m = 0, the rule
+needs more than 3").
+
+**7. A model answer without `evidence`.** One of eight real DeepSeek answers on the stand
+came back as `escalate_human` with no `evidence` list, was rejected by the validator
+(`schema: missing required keys: ['evidence']`) and the incident reached a human without
+the model's analysis. Two changes, neither of which loosens the contract:
+
+* the system prompt now says in so many words that **every** answer, escalations
+  included, carries all four keys, and that thin context goes *into* `evidence` ("no log
+  lines", "replicas_desired = 0") rather than being omitted;
+* a **malformed** answer (kind `schema` or `not_json`) is retried **once**, with the
+  validator's own message and a clipped copy of the previous answer appended
+  (`model.build_retry_prompt`). A **forbidden** answer (`bad_params`, an action outside the
+  whitelist) is never retried - asking again would only invite the model to argue with the
+  policy - and neither is the deterministic tier 0. The retry goes through the same
+  validator, so it can add nothing the first answer could not; if it is rejected too, the
+  incident escalates as before. The card's note says `retried after schema`, tokens and
+  latency of both calls are summed, and `aiops_schema_retries{adapter}` counts them.
 
 ### A live model run: the first real `bad_params`
 
@@ -358,6 +408,7 @@ the Service carries `prometheus.io/scrape: "true"` so the existing
 | `aiops_incidents_tier{tier}` | `rules` or `model` - the cascade, measured |
 | `aiops_model_calls{adapter}` / `aiops_model_errors{adapter}` | cost and failure, per adapter |
 | `aiops_schema_violations{kind}` | the model answered, but not per contract |
+| `aiops_schema_retries{adapter}` | one repeat of a call after a malformed answer (see below) |
 | `aiops_context_failures{source}` | Prometheus or Loki went quiet |
 | `aiops_telegram_sent` / `aiops_telegram_suppressed` | delivered, or rate-limited |
 | `aiops_telegram_documents` | reports delivered as files |

@@ -20,6 +20,8 @@ _HELP = {
     "aiops_escalations": "Decisions turned into a human escalation, by reason.",
     "aiops_model_calls": "Model adapter calls, by adapter.",
     "aiops_model_errors": "Model adapter failures, by adapter.",
+    "aiops_schema_violations": "Model answers the validator rejected, by kind.",
+    "aiops_schema_retries": "Model calls repeated once after a malformed answer, by adapter.",
     "aiops_context_failures": "Context collectors that failed, by source.",
     "aiops_telegram_sent": "Telegram messages sent.",
     "aiops_telegram_suppressed": "Telegram messages suppressed by the rate limit.",

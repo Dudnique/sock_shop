@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from triage_bot.context import LokiClient, collect_context, plan_queries
+from triage_bot.context import (LokiClient, collect_context, plan_queries,
+                                resolve_deployment)
 from tests.stubs import FakeLoki, FakePrometheus, make_settings
 
 
@@ -122,14 +123,16 @@ class CollectContextTests(unittest.TestCase):
             FakePrometheus({"kube_deployment_spec_replicas": 1,
                             "kube_deployment_status_replicas_available": 1}),
             FakeLoki([]))
-        self.assertIn("loki: no log lines in the window", context["missing"])
+        self.assertTrue(any(line.startswith("loki: no log lines") and "scaled to 0" not in line
+                            for line in context["missing"]), context["missing"])
 
     def test_unknown_desired_replicas_is_not_treated_as_scaled_to_zero(self) -> None:
         """Silence is not evidence: without the number the wording stays honest."""
         context = collect_context(
             {"labels": {"namespace": "sock-shop", "deployment": "front-end"}},
             make_settings(), FakePrometheus(), FakeLoki([]))
-        self.assertIn("loki: no log lines in the window", context["missing"])
+        self.assertTrue(any(line.startswith("loki: no log lines") and "scaled to 0" not in line
+                            for line in context["missing"]), context["missing"])
 
     def test_error_filter_falls_back_to_latest_lines(self) -> None:
         class OnceEmptyLoki(FakeLoki):
@@ -205,6 +208,120 @@ class LokiClientParsingTests(unittest.TestCase):
                 LokiClient("http://loki.test").log_lines('{job="pods"}', 60, 10)
         finally:
             context_mod.http_get_json = saved
+
+
+
+def owner(name: str) -> list:
+    """A kube-state-metrics answer: one series whose label names the owner."""
+    return [{"metric": {"owner_name": name}, "value": "1"}]
+
+
+class ResolveDeploymentTests(unittest.TestCase):
+    """PodCrashLooping names a pod and no Deployment; the owner chain names it."""
+
+    LABELS = {"namespace": "sock-shop", "pod": "catalogue-67b8dccb79-kmbhk"}
+
+    def test_pod_resolves_through_the_replicaset(self) -> None:
+        prometheus = FakePrometheus({"kube_pod_owner": owner("catalogue-67b8dccb79"),
+                                     "kube_replicaset_owner": owner("catalogue")})
+        self.assertEqual(resolve_deployment(self.LABELS, prometheus), ("catalogue", ""))
+        # Two lookups, and the second one asks about the ReplicaSet the first returned.
+        self.assertIn('replicaset="catalogue-67b8dccb79"', prometheus.queries[1])
+
+    def test_an_alert_that_already_names_the_deployment_is_left_alone(self) -> None:
+        prometheus = FakePrometheus()
+        labels = {**self.LABELS, "deployment": "front-end"}
+        self.assertEqual(resolve_deployment(labels, prometheus), ("", ""))
+        self.assertEqual(prometheus.queries, [])
+
+    def test_a_pod_without_an_owner_is_a_named_gap(self) -> None:
+        name, note = resolve_deployment(self.LABELS, FakePrometheus())
+        self.assertEqual(name, "")
+        self.assertIn("no ReplicaSet owner", note)
+
+    def test_a_replicaset_without_a_deployment_is_a_named_gap(self) -> None:
+        prometheus = FakePrometheus({"kube_pod_owner": owner("job-abc")})
+        name, note = resolve_deployment(self.LABELS, prometheus)
+        self.assertEqual(name, "")
+        self.assertIn("no Deployment owner", note)
+
+    def test_unreachable_prometheus_is_a_gap_not_a_crash(self) -> None:
+        name, note = resolve_deployment(self.LABELS, FakePrometheus(fail=True))
+        self.assertEqual(name, "")
+        self.assertIn("not resolved", note)
+
+    def test_a_hand_posted_pod_name_cannot_break_out_of_the_selector(self) -> None:
+        prometheus = FakePrometheus()
+        labels = {"namespace": "sock-shop", "pod": 'x"} or vector(1) #'}
+        name, note = resolve_deployment(labels, prometheus)
+        self.assertEqual(name, "")
+        self.assertIn("not a valid object name", note)
+        self.assertEqual(prometheus.queries, [], "nothing may be sent to Prometheus")
+
+
+class PodAlertContextTests(unittest.TestCase):
+    ALERT = {"labels": {"alertname": "PodCrashLooping", "namespace": "sock-shop",
+                        "pod": "catalogue-67b8dccb79-kmbhk", "container": "catalogue"}}
+
+    def collect(self, answers: dict) -> dict:
+        return collect_context(self.ALERT, make_settings(), FakePrometheus(answers), FakeLoki())
+
+    def test_the_resolved_deployment_is_stated_first_and_drives_the_queries(self) -> None:
+        context = self.collect({"kube_pod_owner": owner("catalogue-67b8dccb79"),
+                                "kube_replicaset_owner": owner("catalogue")})
+        self.assertEqual(context["resolved"]["deployment"], "catalogue")
+        self.assertEqual(next(iter(context["prometheus"])),
+                         "deployment_of_pod[catalogue-67b8dccb79-kmbhk]")
+        self.assertIn("replicas_available[catalogue]", [key for key, _ in plan_queries(
+            {**self.ALERT["labels"], "deployment": "catalogue"})])
+        self.assertEqual(self.ALERT["labels"].get("deployment"), None,
+                         "the alert as received must not be edited")
+
+    def test_waiting_reasons_keep_their_names(self) -> None:
+        context = self.collect({
+            "kube_pod_container_status_waiting_reason":
+                [{"metric": {"reason": "CrashLoopBackOff"}, "value": "1"}]})
+        self.assertEqual(
+            context["prometheus"]["pod_waiting_reasons[catalogue-67b8dccb79-kmbhk]"],
+            "CrashLoopBackOff=1")
+
+    def test_an_answer_with_no_series_is_recorded_as_empty_not_as_missing(self) -> None:
+        context = self.collect({})
+        self.assertIn("pod_waiting_reasons[catalogue-67b8dccb79-kmbhk]", context["empty"])
+        self.assertNotIn("pod_waiting_reasons[catalogue-67b8dccb79-kmbhk]",
+                         " ".join(context["missing"]))
+
+    def test_a_failed_query_is_not_recorded_as_empty(self) -> None:
+        context = collect_context(self.ALERT, make_settings(),
+                                  FakePrometheus(fail=True), FakeLoki())
+        self.assertEqual(context["empty"], [])
+
+
+class SilentWorkloadTests(unittest.TestCase):
+    """"No log lines" must say whether Loki is the problem or the workload is quiet."""
+
+    ALERT = {"labels": {"namespace": "sock-shop", "deployment": "front-end"}}
+
+    class SelectiveLoki(FakeLoki):
+        """Answers only for the namespace-wide probe, like a Loki that is up."""
+
+        def log_lines(self, logql, window_seconds, limit):
+            self.queries.append(logql)
+            return ["12:00 other-pod: hello"] if "pod_name" not in logql else []
+
+    def gap(self, loki) -> str:
+        context = collect_context(self.ALERT, make_settings(), FakePrometheus(), loki)
+        return " ".join(context["missing"])
+
+    def test_a_quiet_workload_in_a_namespace_with_logs_says_loki_is_fine(self) -> None:
+        text = self.gap(self.SelectiveLoki())
+        self.assertIn("Loki itself answers", text)
+        self.assertIn("the workload wrote nothing", text)
+
+    def test_a_namespace_with_no_logs_at_all_points_at_loki(self) -> None:
+        text = self.gap(FakeLoki())
+        self.assertIn("whole sock-shop namespace", text)
+        self.assertIn("promtail", text)
 
 
 if __name__ == "__main__":

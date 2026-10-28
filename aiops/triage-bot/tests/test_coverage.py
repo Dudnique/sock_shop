@@ -90,5 +90,16 @@ class CoverageGateTests(unittest.TestCase):
         self.assertLess(confidence, 0.7)
 
 
+
+class PremiseThresholdTests(unittest.TestCase):
+    def test_the_flapping_threshold_is_the_one_the_rule_uses(self) -> None:
+        """The premise check re-asks the rule's own question, with the rule's number."""
+        text = RULES_FILE.read_text(encoding="utf-8")
+        match = re.search(
+            r"alert:\s*PodRestartFlapping\s+expr:.*\[15m\]\)\s*>\s*(\d+)", text)
+        self.assertIsNotNone(match, "PodRestartFlapping expr not found or changed shape")
+        self.assertEqual(int(match.group(1)), MockAdapter.FLAPPING_RESTARTS_THRESHOLD)
+
+
 if __name__ == "__main__":
     unittest.main()

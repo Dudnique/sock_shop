@@ -41,6 +41,8 @@ class FakePrometheus:
             raise SourceError("prometheus is not reachable (stub)")
         for needle, value in self.answers.items():
             if needle in expression:
+                if isinstance(value, list):  # a ready-made answer, labels included
+                    return value
                 return [{"metric": {}, "value": str(value)}]
         return []
 

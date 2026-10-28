@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -132,6 +133,71 @@ def _is_scaled_to_zero(context: dict, deployment: str) -> bool:
     return False
 
 
+#: A Kubernetes object name (DNS-1123). It is checked before a pod name from an
+#: alert is put into a PromQL string, so a hand-posted label cannot break out of
+#: the quotes of the selector.
+_K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+
+
+def resolve_deployment(labels: dict, prometheus: "PrometheusClient") -> tuple:
+    """The Deployment that owns the pod an alert is about: `(name, note)`.
+
+    PodCrashLooping and PodRestartFlapping name a pod and a container but no
+    Deployment, so tier 0 used to stop at "no deployment label" and hand every
+    such alert to a human - the bot could not propose anything for the most
+    common kind of incident. The owner is not guessed from the pod name (the
+    hash suffix makes that a heuristic); kube-state-metrics states it:
+
+        pod --kube_pod_owner--> ReplicaSet --kube_replicaset_owner--> Deployment
+
+    `note` is empty on success and says what failed otherwise, so the gap lands
+    on the card instead of disappearing.
+    """
+    pod = labels.get("pod") or labels.get("pod_name") or ""
+    if labels.get("deployment") or labels.get("deployment_name") or not pod:
+        return "", ""
+    namespace = labels.get("namespace", "sock-shop")
+    if not _K8S_NAME_RE.match(pod) or not _K8S_NAME_RE.match(namespace):
+        return "", f"pod {pod!r}: not a valid object name, owner not looked up"
+    try:
+        owner = prometheus.query(
+            f'kube_pod_owner{{namespace="{namespace}", pod="{pod}", '
+            'owner_kind="ReplicaSet"}')
+        replicaset = owner[0]["metric"].get("owner_name", "") if owner else ""
+        if not replicaset or not _K8S_NAME_RE.match(replicaset):
+            return "", f"pod {pod}: no ReplicaSet owner in kube_pod_owner"
+        parent = prometheus.query(
+            f'kube_replicaset_owner{{namespace="{namespace}", '
+            f'replicaset="{replicaset}", owner_kind="Deployment"}}')
+    except SourceError as exc:
+        return "", f"prometheus: owner of pod {pod} not resolved: {exc}"
+    deployment = parent[0]["metric"].get("owner_name", "") if parent else ""
+    if not deployment or not _K8S_NAME_RE.match(deployment):
+        return "", f"replicaset {replicaset}: no Deployment owner in kube_replicaset_owner"
+    return deployment, ""
+
+
+def _silent_workload_gap(loki: "LokiClient", namespace: str, window_seconds: int) -> str:
+    """Say WHY there are no log lines: Loki is down, or the workload is silent.
+
+    "loki: no log lines in the window" read like a broken Loki on the live stand,
+    while Loki was fine and the pod simply wrote nothing (a crash-looping
+    container that exits at once prints nothing, and a service nobody is calling
+    is quiet). One cheap question settles it: does Loki have ANY line for the
+    namespace in the same window? Only the answer is stated, never a guess: if
+    the probe itself fails, the old wording stays.
+    """
+    try:
+        anything = loki.log_lines(f'{{namespace="{namespace}"}}', window_seconds, 1)
+    except SourceError:
+        return "loki: no log lines in the window"
+    if anything:
+        return ("loki: no log lines from this workload in the window - Loki itself "
+                f"answers (the {namespace} namespace has logs), so the workload wrote nothing")
+    return (f"loki: no log lines for the whole {namespace} namespace in the window - "
+            "check promtail and Loki")
+
+
 def plan_queries(labels: dict) -> list:
     """The metric questions worth asking about *this* alert - and no others.
 
@@ -193,6 +259,22 @@ def plan_queries(labels: dict) -> list:
         queries.append(
             (f"pod_phase[{pod}]",
              f'kube_pod_status_phase{{namespace="{namespace}", pod="{pod}"}} == 1'))
+        # The two questions behind the premise checks of PodCrashLooping and
+        # PodRestartFlapping (adapters.MockAdapter): was the pod waiting in
+        # CrashLoopBackOff, and how often did it restart in the same 15 minutes
+        # the alert rule looks at. The first one looks back 5 minutes instead of
+        # asking "right now": a crash-looping container leaves the waiting state
+        # for a moment on every attempt, and an instant query that lands in that
+        # moment answered "not waiting" about a pod that was crash-looping (found
+        # live, on a 2-minute-old pod; the 10-minute alert rule hits it rarely).
+        queries.append(
+            (f"pod_waiting_reasons[{pod}]",
+             "max by (reason) (max_over_time(kube_pod_container_status_waiting_reason"
+             f'{{namespace="{namespace}", pod="{pod}"}}[5m])) > 0'))
+        queries.append(
+            (f"pod_restarts_15m[{pod}]",
+             "max(increase(kube_pod_container_status_restarts_total"
+             f'{{namespace="{namespace}", pod="{pod}"}}[15m]))'))
     if node:
         queries += [
             (f"node_ready_condition[{node}]",
@@ -211,7 +293,7 @@ def plan_queries(labels: dict) -> list:
 def collect_context(alert: dict, settings, prometheus: PrometheusClient,
                     loki: LokiClient, metrics=None) -> dict:
     """Collect whatever of the plan answers, and say what did not."""
-    labels = alert.get("labels") or {}
+    labels = dict(alert.get("labels") or {})  # a copy: the alert itself stays as sent
     namespace = labels.get("namespace", "sock-shop")
     deployment = labels.get("deployment") or labels.get("deployment_name") or ""
     pod = labels.get("pod") or labels.get("pod_name") or ""
@@ -220,6 +302,12 @@ def collect_context(alert: dict, settings, prometheus: PrometheusClient,
         "prometheus": {},
         "loki": [],
         "missing": [],
+        #: Keys of queries that ANSWERED with no series. Different from a failed
+        #: query (that goes to `missing`): an empty answer is evidence that
+        #: something is not happening, a failure is the absence of evidence, and
+        #: the premise checks of tier 0 need to tell the two apart.
+        "empty": [],
+        "resolved": {},
         "collected_at": time.time(),
         "sources": [],
     }
@@ -228,6 +316,19 @@ def collect_context(alert: dict, settings, prometheus: PrometheusClient,
     #: queries mean the same thing ("Prometheus is not reachable"), and a report
     #: that repeats it nine times hides the actual evidence.
     source_errors: dict = {}
+
+    if pod and not deployment:
+        deployment, note = resolve_deployment(labels, prometheus)
+        if deployment:
+            labels["deployment"] = deployment
+            context["resolved"] = {"deployment": deployment,
+                                   "via": "kube_pod_owner -> kube_replicaset_owner"}
+            # First in the dict on purpose: the card shows the first few facts,
+            # and "which Deployment" is the one the reader needs before the rest.
+            context["prometheus"][f"deployment_of_pod[{pod}]"] = deployment
+            context["sources"].append("prometheus")
+        elif note:
+            context["missing"].append(note)
 
     for key, expression in plan_queries(labels):
         try:
@@ -240,11 +341,17 @@ def collect_context(alert: dict, settings, prometheus: PrometheusClient,
                 metrics.inc("aiops_context_failures", source="prometheus")
             continue
         if not result:
-            continue  # an empty answer is normal for a metric that does not fit
+            context["empty"].append(key)  # normal for a metric that does not fit
+            continue
         if key == "down_targets":
             names = [f'{item["metric"].get("job", "?")}/'
                      f'{item["metric"].get("instance", "?")}' for item in result[:5]]
             context["prometheus"][key] = "; ".join(names)
+        elif key.startswith("pod_waiting_reasons["):
+            # Keep the reason names: "CrashLoopBackOff=1" is evidence, a bare 1 is not.
+            context["prometheus"][key] = "; ".join(
+                f'{item["metric"].get("reason", "?")}={item["value"]}'
+                for item in result[:5])
         elif key.endswith("[namespace]"):
             # One value per Deployment, and the name is the point: this query
             # exists to tell the model *which* object is broken, so dropping the
@@ -290,7 +397,8 @@ def collect_context(alert: dict, settings, prometheus: PrometheusClient,
                     "loki: no pods - the deployment is scaled to 0 (desired=0), "
                     "so there is nothing to log")
             else:
-                context["missing"].append("loki: no log lines in the window")
+                context["missing"].append(_silent_workload_gap(
+                    loki, namespace, settings.log_window_seconds))
         except SourceError as exc:
             context["missing"].append(f"loki: {exc}")
             if metrics:
