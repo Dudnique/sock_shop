@@ -36,6 +36,13 @@ param(
 # command into a terminating error. Exit codes are checked explicitly instead.
 $ErrorActionPreference = "Continue"
 
+# What is piped into a native command is encoded with $OutputEncoding, and on
+# Windows PowerShell 5.1 that is UTF-8 WITH a byte order mark: Vault then reads
+# three invisible bytes at the start of the policy and answers "failed to parse
+# policy: At 1:1: illegal char". Bash sends no BOM, which is why the same command
+# worked there. Plain UTF-8 for everything this script pipes.
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
 $secretsFile = Join-Path $PSScriptRoot "secrets.local.ps1"
 if (Test-Path $secretsFile) { . $secretsFile }
 
