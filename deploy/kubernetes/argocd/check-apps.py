@@ -8,9 +8,13 @@ the Application, and the stand deployed with -GitOps silently lacks a component.
 
 Checks (every failure is printed, the exit code is 1 if there is any):
   1. every directory deploy.ps1 applies has an Application with that path;
-  2. every Application path is applied by the script (no orphans);
+  2. every Application path is applied by the script (no orphans) - except the
+     entries marked `gitopsOnly` (Vault, External Secrets, the ExternalSecret
+     objects), which exist only in this mode and which the script never applies;
   3. every path exists and holds YAML;
-  4. names are unique, waves are integers, `flag` names a top-level toggle.
+  4. an entry with a `chart` (a Helm chart from a repository) names its repo, its
+     chart and an exact version - never a range and never `latest`;
+  5. names are unique, waves are integers, `flag` names a top-level toggle.
 
 `manifests/` and `helm-chart/` are the two interchangeable ways to create the
 same application (deploy.ps1 -Helm picks one); the Application tracks the chart,
@@ -55,7 +59,7 @@ def main() -> int:
     values = yaml.safe_load(VALUES.read_text(encoding="utf-8"))
     apps = values.get("apps") or []
 
-    app_paths = {app["path"] for app in apps}
+    app_paths = {app["path"] for app in apps if "path" in app and not app.get("gitopsOnly")}
     for path in sorted(script_dirs - app_paths):
         errors.append(f"deploy.ps1 applies {path} but no Application has that path")
     for path in sorted(app_paths - script_dirs):
@@ -65,9 +69,21 @@ def main() -> int:
     for name in sorted({n for n in names if names.count(n) > 1}):
         errors.append(f"Application name {name!r} is used more than once")
     for app in apps:
-        directory = ROOT / app["path"]
-        if not directory.is_dir() or not any(directory.glob("*.y*ml")):
-            errors.append(f"{app['name']}: {app['path']} does not exist or holds no YAML")
+        if "path" in app:
+            directory = ROOT / app["path"]
+            if not directory.is_dir() or not any(directory.glob("*.y*ml")):
+                errors.append(f"{app['name']}: {app['path']} does not exist or holds no YAML")
+        elif "chart" in app:
+            chart = app["chart"]
+            for key in ("repoURL", "name", "version"):
+                if not chart.get(key):
+                    errors.append(f"{app['name']}: chart.{key} is missing")
+            if not re.fullmatch(r"\d+\.\d+\.\d+", str(chart.get("version", ""))):
+                errors.append(f"{app['name']}: chart.version {chart.get('version')!r} is not an exact x.y.z")
+        else:
+            errors.append(f"{app['name']}: needs either `path` or `chart`")
+        if app.get("gitopsOnly") is not True and "chart" in app:
+            errors.append(f"{app['name']}: a chart entry is not applied by deploy.ps1, so it must be gitopsOnly")
         if not isinstance(app.get("wave"), int):
             errors.append(f"{app['name']}: wave must be an integer")
         flag = app.get("flag")

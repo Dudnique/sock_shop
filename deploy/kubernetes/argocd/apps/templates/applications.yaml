@@ -1,8 +1,12 @@
 {{- /*
 One Application per entry of .Values.apps. The sync policy is the same for all:
 automated, with prune and selfHeal, so git is the source of truth and a manual
-`kubectl edit` is undone. Secrets are not in git (deploy.ps1 creates them), so
-prune cannot touch them: Argo CD only ever deletes what it tracks.
+`kubectl edit` is undone. Secrets are not in git (they live in Vault and are
+copied into the cluster by External Secrets), so prune cannot touch them: Argo CD
+only ever deletes what it tracks.
+
+An entry has either `path` (a directory of this repository) or `chart` (a Helm
+chart from a chart repository: Vault and External Secrets are installed this way).
 */ -}}
 {{- range .Values.apps }}
 {{- $on := true }}
@@ -19,6 +23,17 @@ metadata:
 spec:
   project: default
   source:
+    {{- if .chart }}
+    repoURL: {{ .chart.repoURL }}
+    chart: {{ .chart.name }}
+    targetRevision: {{ .chart.version | quote }}
+    helm:
+      releaseName: {{ .name }}
+      {{- with .chart.values }}
+      valuesObject:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- else }}
     repoURL: {{ $.Values.repoURL }}
     targetRevision: {{ $.Values.revision }}
     path: {{ .path }}
@@ -26,15 +41,13 @@ spec:
     helm:
       releaseName: {{ .name }}
     {{- end }}
+    {{- end }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ .namespace }}
-  {{- if .ignoreReplicas }}
+  {{- with .ignoreDifferences }}
   ignoreDifferences:
-    - group: apps
-      kind: Deployment
-      jsonPointers:
-        - /spec/replicas
+    {{- toYaml . | nindent 4 }}
   {{- end }}
   syncPolicy:
     automated:
@@ -44,14 +57,14 @@ spec:
       - CreateNamespace=true
       # Server-side: some ConfigMaps here (Grafana dashboards, the Prometheus
       # rules) are close to the 256 KiB limit of the last-applied annotation that
-      # client-side apply writes.
+      # client-side apply writes, and the External Secrets CRDs are far beyond it.
       - ServerSideApply=true
       # Re-apply only what changed; an unchanged Job or Deployment is left alone.
       - ApplyOutOfSyncOnly=true
-      {{- if .ignoreReplicas }}
+      {{- if .ignoreDifferences }}
       - RespectIgnoreDifferences=true
       {{- end }}
-    # A Secret that deploy.ps1 creates a moment later, or a Deployment whose
+    # A Secret that External Secrets creates a moment later, or a Deployment whose
     # dependency is not up yet, fails the first sync; trying again is the cure.
     retry:
       limit: 8

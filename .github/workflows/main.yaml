@@ -69,6 +69,7 @@ jobs:
           /work/deploy/kubernetes/manifests-aiops \
           /work/deploy/kubernetes/manifests-loadtest \
           /work/deploy/kubernetes/manifests-policy \
+          /work/deploy/kubernetes/manifests-secrets \
           /work/deploy/kubernetes/autoscaling
     # The Prometheus rules are NOT Kubernetes manifests (no apiVersion/kind:
     # they are a rule file, embedded in a ConfigMap data key), so kubeconform

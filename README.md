@@ -186,6 +186,13 @@ up, `deploy.ps1` reads both values back out of the cluster's own `alertmanager-s
 Secret (kubectl hands Secret values over base64-encoded) and re-applies it. Either way
 nothing is pasted anywhere and nothing is typed on a command line.
 
+**In GitOps mode** (`deploy.ps1 -GitOps`) the same file is read, but the Secrets are not
+created by the script: `deploy\vault-seed.ps1` writes the values into Vault (a pod in the
+cluster, dev mode), and External Secrets turns them into the Kubernetes Secrets. The file
+is still the only place you keep the values. A Vault restart empties it (dev mode), and
+the cure is one command, `.\deploy\vault-seed.ps1`. How it works:
+[`deploy/kubernetes/manifests-secrets/README.md`](deploy/kubernetes/manifests-secrets/README.md).
+
 ## Manual deployment (without the script)
 
 ```powershell

@@ -1,0 +1,27 @@
+# The Secret `aiops-llm` with the DeepSeek API key that the triage bot mounts
+# (manifests-aiops/02-triage-bot-dep.yaml). Built from Vault:
+# secret/sock-shop/aiops.
+#
+# The key is optional. deploy/vault-seed.ps1 stores an empty string when there is
+# none, the bot strips the file and treats an empty key as "no model": it falls
+# back to its ruleset and says so on every card. The Secret exists either way, so
+# the Deployment never waits for it.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: aiops-llm
+  namespace: monitoring
+spec:
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: vault
+  target:
+    name: aiops-llm
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: deepseek_api_key
+      remoteRef:
+        key: sock-shop/aiops
+        property: deepseek_api_key

@@ -1,7 +1,11 @@
-# What runs on the stand, as data. Each entry is one Argo CD Application; its
+# What runs on the stand, as data. Each entry is one Argo CD Application.
+#
 # `path` is the directory `deploy.ps1` applies for the same step, and
 # `check-apps.py` (run by CI) fails when a directory is applied by the script
 # and has no entry here - so the two ways of deploying cannot drift apart.
+# `gitopsOnly: true` marks what exists only in this mode (Vault, External
+# Secrets and the ExternalSecret objects): the script does not apply it, so the
+# gate does not look for it there.
 
 repoURL: https://github.com/Dudnique/sock_shop.git
 # Overridden by the root Application (deploy.ps1 -GitRevision).
@@ -14,10 +18,76 @@ aiops:
 loadtest:
   enabled: false
 
-# `wave` orders the Applications (lower first), mirroring the order of deploy.ps1:
-# the application and its network policies, then autoscaling and the log and
-# trace backends, then monitoring and alerting, then the optional parts.
+# `wave` orders the Applications (lower first). Secrets come first because
+# everything else mounts them: Vault, then External Secrets (it brings the CRDs),
+# then the ExternalSecret objects; after that the order of deploy.ps1: the
+# application and its network policies, then autoscaling and the log and trace
+# backends, then monitoring and alerting, then the optional parts.
 apps:
+  - name: vault
+    gitopsOnly: true
+    wave: -3
+    namespace: vault
+    chart:
+      repoURL: https://helm.releases.hashicorp.com
+      name: vault
+      version: 0.34.1
+      values:
+        # DEV MODE: one pod, unsealed, in-memory storage, a fixed root token.
+        # Everything stored in it is gone when the pod restarts, which is fine for
+        # a stand whose secrets are re-seeded from deploy/secrets.local.ps1 by
+        # deploy/vault-seed.ps1, and wrong for anything else (a real Vault is HA
+        # Raft storage with auto-unseal; see manifests-secrets/README.md).
+        server:
+          dev:
+            enabled: true
+            devRootToken: root
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 256Mi}
+        # No sidecar injector: External Secrets is the only consumer.
+        injector:
+          enabled: false
+        ui:
+          enabled: true
+  - name: external-secrets
+    gitopsOnly: true
+    wave: -2
+    namespace: external-secrets
+    chart:
+      repoURL: https://charts.external-secrets.io
+      name: external-secrets
+      version: 2.14.0
+      values:
+        installCRDs: true
+        resources:
+          requests: {cpu: 20m, memory: 48Mi}
+          limits: {memory: 192Mi}
+        webhook:
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+        certController:
+          resources:
+            requests: {cpu: 10m, memory: 48Mi}
+            limits: {memory: 128Mi}
+    # The cert controller writes the webhook CA bundle into the CRDs and the
+    # webhook configurations after install; without this Argo CD sees that as
+    # drift and fights it forever.
+    ignoreDifferences:
+      - group: apiextensions.k8s.io
+        kind: CustomResourceDefinition
+        jqPathExpressions:
+          - .spec.conversion.webhook.clientConfig.caBundle
+      - group: admissionregistration.k8s.io
+        kind: ValidatingWebhookConfiguration
+        jqPathExpressions:
+          - .webhooks[].clientConfig.caBundle
+  - name: secrets
+    gitopsOnly: true
+    path: deploy/kubernetes/manifests-secrets
+    namespace: monitoring
+    wave: -1
   - name: sock-shop
     path: deploy/kubernetes/helm-chart
     namespace: sock-shop
@@ -26,7 +96,11 @@ apps:
     # The HPAs own `spec.replicas`. Without this Argo CD sees every scaled
     # Deployment as drift and, with selfHeal, scales it back - a fight with the
     # autoscaler that the chart's own install already hit with Helm (FIXES 25).
-    ignoreReplicas: true
+    ignoreDifferences:
+      - group: apps
+        kind: Deployment
+        jsonPointers:
+          - /spec/replicas
   - name: network-policies
     path: deploy/kubernetes/manifests-policy
     namespace: sock-shop

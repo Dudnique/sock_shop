@@ -2020,3 +2020,65 @@ that does not parse). 15 rules now; `promtool` passes, the bot's coverage test p
 **An honest correction while testing.** My first reading of the metric came back `1` while the log
 already showed the rejected reload; the query had hit a value from before the next scrape. Read again it
 was `0`, and the scrape interval (15 s) is the reason the alert has a `for`.
+
+## 32. Secrets from Vault: the script stopped creating them, and four things that broke on the way
+
+**What was added.** In `deploy.ps1 -GitOps` the three Secrets (`grafana-admin`, `alertmanager-secrets`,
+`aiops-llm`) are no longer created by the script. Vault (dev mode, a pod in the cluster) and External
+Secrets Operator are two more Argo CD Applications (waves -3 and -2, installed from the pinned charts
+`vault` 0.34.1 and `external-secrets` 2.14.0); three `ExternalSecret` objects in
+`manifests-secrets/` say where each Secret comes from and hold no value. `deploy/vault-seed.ps1` writes
+the values into Vault from the same `secrets.local.ps1`, sets up the Kubernetes auth method (External
+Secrets logs in with its own ServiceAccount token, so no credential is stored anywhere) and a read-only
+policy for `secret/sock-shop/*`. Nothing needs to be installed on the PC. The plain path and `-Helm` are
+unchanged. `check-apps.py` now also requires an exact chart version and knows `gitopsOnly` entries
+(12 Applications; its negative test still goes red).
+
+**Verified live.**
+
+| What | Result |
+| ---- | ------ |
+| clean deploy from an empty machine, final scripts, nothing interrupted | **12 minutes, exit 0**, 12 of 12 Applications `Synced/Healthy`, 33 of 33 Prometheus targets up, the three `ExternalSecret`s `SecretSynced` with no help |
+| the four values in the Secrets against `secrets.local.ps1` | identical (compared, not printed) |
+| a value rotated in Vault | the Kubernetes Secret after 41 s, the file in the Alertmanager pod after 42 s, Alertmanager reloaded by the sidecar after 42 s (section 31); the real value restored by `vault-seed.ps1` in 56 s |
+| the Vault pod deleted (dev mode forgets everything) | the Secrets already in the cluster stayed identical (`deletionPolicy: Retain`); after `vault-seed.ps1` all three `ExternalSecret`s were synced again in 44 s |
+
+The rotation test used a throw-away value for the Telegram token (a real one can only be issued by
+BotFather); no alert was firing, so nothing was sent with it, and the script put the real token back.
+An honest limit of the data-loss test: the `ExternalSecret`s were already in error from an earlier,
+interrupted run, so the time at which External Secrets *notices* a lost Vault was not measured.
+
+**What broke on the way (all four were in my own new code).**
+
+1. **A byte order mark that only appeared in some consoles.** The first deploy died on "failed to parse
+   policy: At 1:1: illegal char" - three invisible bytes (EF BB BF) at the start of what was piped into
+   `kubectl exec`. Two layers, both Windows PowerShell 5.1: text piped to a native command gets a BOM and a
+   stray line break whatever `$OutputEncoding` says; and starting the process by hand did not help,
+   because .NET builds the redirected stdin with the *console's* input encoding and flushes it at once,
+   so a UTF-8 console (code page 65001) writes a BOM there. The same script worked from a window with code
+   page 437 and failed from one with 65001, which is how it was found. Fix: `kubectl` is started as a
+   process, its stdin is written as raw UTF-8 bytes, and the console input encoding is switched to
+   BOM-less UTF-8 for the one `Start-Process` call. The first version of the fix (only `$OutputEncoding`)
+   did nothing, and the second (raw bytes) still failed in a UTF-8 console; both were measured with
+   `od -tx1` inside the container, not guessed.
+2. **External Secrets logged in before the role existed.** Because of (1) the seed died before creating
+   the Vault role, so External Secrets, already running, answered `invalid role name` and backed off. It
+   recovered on a forced sync; on a clean deploy the seed finishes first and it does not happen.
+3. **A missed API poll killed a green deploy.** All 12 Applications were healthy when `deploy.ps1`
+   aborted: the wait loop used a bare `kubectl ... 2>$null`, and one "TLS handshake timeout" from the k3d
+   API server became a terminating error under PowerShell 5.1 - the very trap `Invoke-QuietProbe` exists
+   for. The loop now uses it.
+4. **My test for the Vault restart was wrong the first time**: it took the old, still-terminating pod for
+   the new one. It now waits for a new pod UID.
+
+**Memory.** Measured: Argo CD 365 MiB, Vault 100, External Secrets 245 (three pods), the reload sidecars
+1-2 each: about 0.7 GB for GitOps and secrets together. The settled stand is ~6.5 GiB (sum of the node
+containers) of the 8.73 GiB the Docker VM now has. `%UserProfile%\.wslconfig` was raised from `memory=8GB`
+to `9GB` (backup next to it as `.wslconfig.bak-before-9gb`): it was 7.76 GiB and ~6.0 GiB used, a 1.7 GiB
+margin, and the VM has wedged on exactly that kind of margin before (section 22). Not higher: the host has
+15.2 GB and Windows had 0.5 GB free while the stand ran.
+
+**Not done.** Dev mode is a mechanism demo, not a hardened Vault: one pod, data in memory, a public root
+token. A real one is HA Raft storage, auto-unseal and no static root token. Nothing alerts when an
+`ExternalSecret` is in error (for example after a Vault restart): the Secrets keep working, but they stop
+being refreshed in silence - the same shape of gap as section 31, and the next thing to close (TODO).
