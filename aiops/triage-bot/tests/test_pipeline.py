@@ -116,7 +116,71 @@ class CascadeTests(unittest.TestCase):
         self.assertTrue(any(name == "aiops_schema_violations"
                             for (name, _labels) in metrics.snapshot()))
         self.assertFalse(incident["executable"])
-        self.assertEqual(incident["tiers"][-1]["validation_note"], "not_json")
+        self.assertTrue(incident["tiers"][-1]["validation_note"].startswith("not_json"))
+
+
+class RetryAfterMalformedAnswerTests(unittest.TestCase):
+    """One retry for a malformed answer, none for a forbidden one."""
+
+    NO_EVIDENCE = json.dumps({"action_id": "escalate_human", "confidence": 0.5,
+                              "reason": "нет данных"}, ensure_ascii=False)
+
+    class Sequenced(StubAdapter):
+        """Answers from a list, one per call - the first bad, the second good."""
+
+        def __init__(self, settings, texts: list) -> None:
+            super().__init__(settings, text="")
+            self.texts = list(texts)
+
+        def decide(self, system, user, alert, context):
+            answer = super().decide(system, user, alert, context)
+            answer.text = self.texts.pop(0) if self.texts else self.texts_last
+            return answer
+
+    def run_alert(self, texts: list):
+        settings = make_settings(model_adapter="deepseek")
+        stub = self.Sequenced(settings, texts)
+        stub.texts_last = texts[-1]
+        metrics = Metrics()
+        pipeline = make_pipeline(settings=settings, model_adapter=stub, metrics=metrics)
+        summary = pipeline.handle_webhook(alert_payload(alertname="ProbeFailed"))
+        return stub, metrics, pipeline.find_incident(summary["triaged"][0]["id"])
+
+    def test_a_missing_evidence_key_is_retried_once_and_the_retry_is_used(self) -> None:
+        stub, metrics, incident = self.run_alert([self.NO_EVIDENCE, escalation_text()])
+        self.assertEqual(len(stub.calls), 2)
+        self.assertIn("REJECTED by the validator (schema)", stub.calls[1]["user"])
+        self.assertIn("missing required keys", stub.calls[1]["user"])
+        tier = incident["tiers"][-1]
+        self.assertIn("retried after schema", tier["validation_note"])
+        self.assertEqual(tier["decision"]["reason"], "правила не знают")
+        self.assertTrue(any(name == "aiops_schema_retries"
+                            for (name, _labels) in metrics.snapshot()))
+
+    def test_a_second_bad_answer_escalates_and_is_not_retried_again(self) -> None:
+        stub, _metrics, incident = self.run_alert([self.NO_EVIDENCE, self.NO_EVIDENCE])
+        self.assertEqual(len(stub.calls), 2, "exactly one retry")
+        tier = incident["tiers"][-1]
+        self.assertIn("answer rejected by the validator", tier["decision"]["reason"])
+        self.assertIn("after a retry", tier["validation_note"])
+        self.assertFalse(incident["executable"])
+
+    def test_a_forbidden_action_is_never_retried(self) -> None:
+        bad = json.dumps({"action_id": "delete_namespace", "confidence": 0.9,
+                          "reason": "x", "evidence": ["y"]})
+        stub, _metrics, incident = self.run_alert([bad, escalation_text()])
+        self.assertEqual(len(stub.calls), 1)
+        self.assertFalse(incident["executable"])
+
+    def test_a_good_first_answer_costs_one_call(self) -> None:
+        stub, metrics, _incident = self.run_alert([escalation_text()])
+        self.assertEqual(len(stub.calls), 1)
+        self.assertFalse(any(name == "aiops_schema_retries"
+                             for (name, _labels) in metrics.snapshot()))
+
+    def test_the_prompt_says_evidence_is_never_omitted(self) -> None:
+        from triage_bot.model import system_prompt
+        self.assertIn("EVERY answer carries ALL four keys", system_prompt())
 
 
 class FilterTests(unittest.TestCase):

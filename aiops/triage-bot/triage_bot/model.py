@@ -100,6 +100,11 @@ Answer with ONE JSON object and nothing else - no prose, no markdown fences:
  "params": {"namespace": "...", "deployment": "...", "replicas": <int>}}
 
 Rules:
+- EVERY answer carries ALL four keys action_id, confidence, reason and evidence -
+  escalate_human included. An escalation with no "evidence" list is rejected and
+  the incident reaches a human without your analysis; if the context is thin,
+  evidence says so ("no log lines", "replicas_desired = 0"), it is never omitted
+  and never empty.
 - action_id MUST be one of: {action_ids}.
 - reason MUST name the likely cause and the chain that leads to it: what the
   alert says -> what the evidence shows -> which object is broken and why the
@@ -119,6 +124,19 @@ Rules:
 - "proposal" is allowed only together with escalate_human: it is shown to a
   human, it is never executed, and a proposal attached to an action is rejected.
 - You cannot run anything. A human approves every action."""
+
+
+def build_retry_prompt(user_prompt: str, kind: str, message: str, previous: str) -> str:
+    """The same question again, plus what the validator said about the last answer.
+
+    Only the validator's own sentence and a clipped copy of the model's previous
+    answer are added; no new instructions that could widen what is allowed.
+    """
+    return (f"{user_prompt}\n\nYour previous answer was REJECTED by the validator "
+            f"({kind}): {message}\n"
+            f"Previous answer (clipped):\n{previous[:500]}\n\n"
+            "Answer again with ONE JSON object that has ALL required keys "
+            "(action_id, confidence, reason, evidence as a non-empty list) and nothing else.")
 
 
 def system_prompt() -> str:

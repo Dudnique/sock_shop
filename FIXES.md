@@ -1928,5 +1928,16 @@ Loki". If that probe itself fails, the old wording stays. Checked live without s
 Telegram (collect_context against port-forwarded Prometheus and Loki): `front-end` -> the first
 wording, `catalogue` -> 20 lines. Tests: 158.
 
+**The model answer with no `evidence`.** Section 28's check of the model tier produced one
+rejected answer in eight (`schema: missing required keys: ['evidence']`): `escalate_human` without
+the list. The validator did its job, but the incident reached a human with none of the model's
+analysis. The system prompt now states that every answer carries all four keys, and a malformed
+answer (`schema`, `not_json`) is retried once with the validator's own message; a forbidden action
+(`bad_params`, outside the whitelist) and the deterministic tier 0 are never retried, and the retry
+goes through the same validator. New counter `aiops_schema_retries{adapter}`. Tests: 163 (was 158),
+including "a second bad answer is not retried again" and "a forbidden action is never retried". Not
+verified live: the model cannot be made to produce a malformed answer on demand, so the retry is
+covered by the unit tests only; the first live retries will show up in `aiops_schema_retries`.
+
 Tests: 156 (was 136), all standard library. Not covered: a pod whose owner is not a Deployment (a
 Job, a StatefulSet) is reported as a named gap and escalates; there is no tier-0 action for it.

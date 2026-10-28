@@ -205,6 +205,23 @@ Deployment; the same two alerts on a healthy `catalogue` pod -> `escalate_human`
 ("no container of the pod is in a waiting state" / "pod_restarts_15m = 0, the rule
 needs more than 3").
 
+**7. A model answer without `evidence`.** One of eight real DeepSeek answers on the stand
+came back as `escalate_human` with no `evidence` list, was rejected by the validator
+(`schema: missing required keys: ['evidence']`) and the incident reached a human without
+the model's analysis. Two changes, neither of which loosens the contract:
+
+* the system prompt now says in so many words that **every** answer, escalations
+  included, carries all four keys, and that thin context goes *into* `evidence` ("no log
+  lines", "replicas_desired = 0") rather than being omitted;
+* a **malformed** answer (kind `schema` or `not_json`) is retried **once**, with the
+  validator's own message and a clipped copy of the previous answer appended
+  (`model.build_retry_prompt`). A **forbidden** answer (`bad_params`, an action outside the
+  whitelist) is never retried - asking again would only invite the model to argue with the
+  policy - and neither is the deterministic tier 0. The retry goes through the same
+  validator, so it can add nothing the first answer could not; if it is rejected too, the
+  incident escalates as before. The card's note says `retried after schema`, tokens and
+  latency of both calls are summed, and `aiops_schema_retries{adapter}` counts them.
+
 ### A live model run: the first real `bad_params`
 
 `run-local.ps1 -Model deepseek -Alertname ProbeFailed -Fresh` against the stand:
@@ -391,6 +408,7 @@ the Service carries `prometheus.io/scrape: "true"` so the existing
 | `aiops_incidents_tier{tier}` | `rules` or `model` - the cascade, measured |
 | `aiops_model_calls{adapter}` / `aiops_model_errors{adapter}` | cost and failure, per adapter |
 | `aiops_schema_violations{kind}` | the model answered, but not per contract |
+| `aiops_schema_retries{adapter}` | one repeat of a call after a malformed answer (see below) |
 | `aiops_context_failures{source}` | Prometheus or Loki went quiet |
 | `aiops_telegram_sent` / `aiops_telegram_suppressed` | delivered, or rate-limited |
 | `aiops_telegram_documents` | reports delivered as files |

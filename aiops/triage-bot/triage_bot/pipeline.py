@@ -49,6 +49,10 @@ SNOOZE_SECONDS = 4 * 3600
 ADVICE_COOLDOWN_SECONDS = 30
 
 
+#: Rejection kinds worth ONE retry: the answer was malformed, not forbidden.
+RETRYABLE_KINDS = ("schema", "not_json")
+
+
 def incident_id(alert: dict) -> str:
     """A short, stable id: the same alert keeps the same id for a human's eyes."""
     parts = (alert.get("fingerprint", "") or "",
@@ -127,30 +131,69 @@ class TriagePipeline:
                         f"model unavailable: {exc}", adapter=adapter.name).to_dict()}
 
         self.metrics.inc("aiops_model_calls", adapter=answer.adapter)
+        tokens = answer.prompt_tokens + answer.completion_tokens
+        latency_ms = answer.latency_ms
+        retried = ""
         try:
-            payload = model_mod.parse_decision_json(answer.text)
-            decision = model_mod.validate_decision(
-                payload, self.settings, adapter=answer.adapter, model=answer.model)
-            # Whatever the validator tolerated (e.g. params dropped next to an
-            # escalation) travels with the decision and is shown on the card.
-            note = decision.validation_note
+            decision, note = self._validate(answer)
         except model_mod.DecisionError as exc:
-            # A rejection is data: it counts, it is visible, and it escalates.
             self.metrics.inc("aiops_schema_violations", kind=exc.kind)
-            decision = model_mod.escalate(
-                f"answer rejected by the validator ({exc.kind}): {exc.message}",
-                adapter=answer.adapter, model=answer.model, raw={"raw_answer": answer.text[:500]})
-            note = exc.kind
+            # A malformed answer (a missing key, prose instead of JSON) is a format
+            # slip a model can correct when it is told what was wrong - one retry,
+            # with the validator's own message. A rejected ACTION (bad_params, a name
+            # outside the whitelist) is never retried: asking again would only invite
+            # the model to argue with the policy. The retry goes through the same
+            # validator, so it can add nothing the first answer could not.
+            if exc.kind in RETRYABLE_KINDS and not adapter.deterministic:
+                self.metrics.inc("aiops_schema_retries", adapter=adapter.name)
+                try:
+                    second = adapter.decide(
+                        model_mod.system_prompt(),
+                        model_mod.build_retry_prompt(
+                            model_mod.build_user_prompt(alert, context),
+                            exc.kind, exc.message, answer.text),
+                        alert, context)
+                except AdapterError as retry_exc:
+                    log.error("adapter %s failed on the retry: %s", adapter.name, retry_exc)
+                    second = None
+                if second is not None:
+                    self.metrics.inc("aiops_model_calls", adapter=second.adapter)
+                    tokens += second.prompt_tokens + second.completion_tokens
+                    latency_ms += second.latency_ms
+                    answer, retried = second, exc.kind
+                    try:
+                        decision, note = self._validate(second)
+                        note = f"retried after {exc.kind}" + (f"; {note}" if note else "")
+                        exc = None
+                    except model_mod.DecisionError as exc2:
+                        self.metrics.inc("aiops_schema_violations", kind=exc2.kind)
+                        exc = exc2
+            if exc is not None:
+                # A rejection is data: it counts, it is visible, and it escalates.
+                decision = model_mod.escalate(
+                    f"answer rejected by the validator ({exc.kind}): {exc.message}",
+                    adapter=answer.adapter, model=answer.model,
+                    raw={"raw_answer": answer.text[:500]})
+                note = exc.kind + (" (after a retry)" if retried else "")
         return {
             "tier": tier,
             "adapter": answer.adapter,
             "model": answer.model,
-            "latency_ms": answer.latency_ms,
-            "tokens": answer.prompt_tokens + answer.completion_tokens,
+            "latency_ms": latency_ms,
+            "tokens": tokens,
             "validation_note": note,
             "alertname": alertname,
             "decision": decision.to_dict(),
         }
+
+    def _validate(self, answer: ModelAnswer) -> tuple:
+        """`(decision, note)` or raise DecisionError - one answer, one verdict."""
+        payload = model_mod.parse_decision_json(answer.text)
+        decision = model_mod.validate_decision(
+            payload, self.settings, adapter=answer.adapter, model=answer.model)
+        # Whatever the validator tolerated (e.g. params dropped next to an
+        # escalation) travels with the decision and is shown on the card.
+        return decision, decision.validation_note
 
     # --- the cascade ---------------------------------------------------------
     def triage(self, alert: dict) -> dict:

@@ -43,6 +43,9 @@ class AdapterError(RuntimeError):
 
 class Adapter:
     name = "base"
+    #: A deterministic adapter answers the same thing twice, so asking it again
+    #: after a rejected answer would only repeat the rejection.
+    deterministic = False
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -66,6 +69,7 @@ class MockAdapter(Adapter):
     """Tier 0: deterministic, offline, evidence-driven (the runbook in code)."""
 
     name = "mock"
+    deterministic = True
 
     #: alertname -> (action_id, confidence, reason). The keys are the alert
     #: names shipped in `manifests-monitoring/05-prometheus-alertrules.yaml`;
