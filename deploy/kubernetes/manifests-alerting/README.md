@@ -29,13 +29,21 @@ carries `continue: true`:
           matchers: ['aiops="true"']
           continue: true          # the two human channels below still run
         - receiver: 'telegram'
-          continue: true          # keep going to the next sibling
-        - receiver: 'slack'
+          matchers: ['severity="critical"']
+          continue: true          # a critical alert also reaches Slack below
+        - receiver: 'slack'       # no matcher: every alert, so warnings land here
 
 The bot's route is guarded by a matcher, so only the rules that opted in with
-`aiops: "true"` reach it, while the human routes carry no matcher and match
-everything. That asymmetry is the point: automation is opt-in per rule, a
-notification is not.
+`aiops: "true"` reach it. The humans are routed by severity: a `critical` alert
+goes to Telegram and Slack, a `warning` to Slack only. Before that every alert
+reached both channels (and the bot's card on top), which is what made a short
+`ScrapeTargetDown` or a `ProbeSlow` next to a `ProbeFailed` feel like spam.
+
+One `inhibit_rules` entry removes a real duplicate: while `ProbeFailed` fires for
+a probe, `ProbeSlow` for the same `instance` is muted - a probe that times out is
+also slower than 2s. Check a route without sending anything:
+
+    kubectl exec -n monitoring deploy/alertmanager -- amtool config routes test       --config.file=/etc/alertmanager/config.yml severity=warning aiops=true
 
 ## The triage bot route
 
@@ -51,7 +59,7 @@ notification is not.
 * **`send_resolved: false`.** The bot triages firing incidents; a resolved
   webhook is answered `200` and recorded as `skipped: resolved`, so sending them
   would only inflate `aiops_alerts_skipped{reason="resolved"}`. Humans still get
-  the resolution through the `telegram` receiver.
+  the resolution through the `slack` receiver (and `telegram` for criticals).
 
 If the bot is down, Alertmanager's webhook fails and nothing else changes: the
 human routes are independent siblings. A bot that were the single notifier would

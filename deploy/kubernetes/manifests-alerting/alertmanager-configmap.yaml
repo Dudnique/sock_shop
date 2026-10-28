@@ -30,13 +30,26 @@ data:
           matchers:
             - aiops="true"
           continue: true
-        # Two child routes WITHOUT matchers match every alert, so each alert is
-        # delivered to both receivers. `continue: true` on the first makes the
-        # evaluation proceed to the next sibling. (Without this, the root
-        # receiver would be skipped entirely once a child matched.)
+        # Humans are paged by severity, not by default. A `warning` is something to
+        # look at during the day, so it goes to Slack only; a `critical` is an
+        # outage and goes to Telegram as well. Before this, every alert of either
+        # severity reached both channels, on top of the triage bot's own card.
+        # `continue: true` on the Telegram route lets the same critical alert
+        # reach the Slack route below; the last route catches every warning.
         - receiver: 'telegram'
+          matchers:
+            - severity="critical"
           continue: true
         - receiver: 'slack'
+
+    # A slow probe is the same fact as a failed one: a probe that times out is
+    # also "slower than 2s", so ProbeFailed and ProbeSlow used to arrive together.
+    inhibit_rules:
+      - source_matchers:
+          - alertname="ProbeFailed"
+        target_matchers:
+          - alertname="ProbeSlow"
+        equal: ['instance']
 
     receivers:
       # --- Telegram ----------------------------------------------------------

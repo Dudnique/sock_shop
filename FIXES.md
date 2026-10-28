@@ -1835,3 +1835,46 @@ test: **92 queries, 0 empty**, seven dashboards. Two traps it had to get past ar
 Grafana proxies a datasource by numeric `id` only (the `uid` route answers `500 Unable to load
 datasource meta data`), and a template variable set to "All" must turn `instance="$node"` into
 `instance=~".*"`, or the query is empty for a reason that has nothing to do with the stand.
+
+## 28. The scrape alert that a slow start could trigger, and the channels that were all paged for everything
+
+**What was measured.** On a fresh `-Helm` stand `ScrapeTargetDown` went to `pending` for five series
+within the first hour and never fired, which looked fine. It did not fire by luck: the `carts` target
+was down for 3 minutes and `orders` for 2, and the rule waits 5. `role: endpoints` in
+`04-prometheus-configmap.yaml` lists addresses that are not Ready yet, and `carts` and `shipping`
+take up to 420 and 360 seconds to open their port (`initialDelaySeconds` of their readiness probe,
+section 26), so every rollout and every replica the HPA adds is a scrape failure of 5 minutes or
+more - an alert about a pod that is simply starting.
+
+**Fix.** Both pod-level jobs (`kubernetes-service-endpoints`, `kubernetes-pods`) drop targets whose
+`__meta_kubernetes_endpoint_ready` / `__meta_kubernetes_pod_ready` is `false`. A Ready pod that cannot
+be scraped still alerts; a Deployment that never becomes Ready is the job of
+`DeploymentReplicasUnavailable`. Checked live: `kubectl rollout restart deploy/carts`, then 14 samples
+over five minutes while the new pod sat at `0/1` - `count(up == 0)` was **0** in every sample and the
+`carts` target count stayed at 1 (the old pod), where the same situation had produced a down target.
+
+**Notifications.** Every alert used to reach Telegram *and* Slack, and, because every rule carries
+`aiops: "true"`, the triage bot's card as well - three messages for one `warning`. Routing is now by
+severity: `critical` goes to Telegram and Slack, `warning` to Slack only, the bot route is unchanged.
+One `inhibit_rules` entry mutes `ProbeSlow` while `ProbeFailed` fires for the same `instance` (a probe
+that times out is also slower than 2 s). Checked with `amtool config routes test` inside the pod:
+`warning aiops` -> `aiops-triage,slack`; `critical aiops` -> `aiops-triage,telegram,slack`;
+`critical` -> `telegram,slack`; `warning` -> `slack`. Probes were left alone: their measured latency
+on this stand is 11-42 ms against a 2 s threshold, and no probe failed in the first hour.
+
+**What the triage bot does (checked against the live stand, DeepSeek key present).**
+`DeploymentReplicasUnavailable` against a healthy `front-end` -> `escalate_human`, with both numbers
+as the reason. The same alert against `payment` scaled to 0 -> `escalate_human` from the rules *and*
+from the model, both saying "desired=0 - this is a scale, not a restart"; the model had the whitelist's
+`scale_deployment` available and did not use it, which is the cautious side of the line.
+`ProbeSlow` (below the threshold on purpose) -> rules escalate, the model tier opens (1023 tokens,
+2.9 s) and also escalates at 0.55. `PodCrashLooping` -> `restart_deployment` with the command
+`kubectl -n sock-shop rollout restart deployment/catalogue` rendered by the code from validated
+parameters.
+
+**What it does not do yet.** The last case was a synthetic alert against a `catalogue` that was
+perfectly healthy, and the rules still proposed the restart at 0.80: the check "is the alert still
+true" exists only for `DeploymentReplicasUnavailable`. `PodCrashLooping` and `PodRestartFlapping` are
+taken at their word. It is an advisor today, so a human sees the card first, but the context does not
+yet tell "the query returned nothing" from "the query failed", and that distinction is what a safe
+premise check needs (TODO, section 2).
