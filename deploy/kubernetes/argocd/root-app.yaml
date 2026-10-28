@@ -1,0 +1,36 @@
+# The one Application that deploy.ps1 -GitOps applies by hand. It points at the
+# apps/ chart in this repository, and that chart renders one Application per
+# directory of deploy/kubernetes - so from here on the list of what runs on the
+# stand is a file in git, and changing it is a commit.
+#
+# `main` below is a default: deploy.ps1 -GitRevision <branch> replaces BOTH
+# occurrences (the revision this Application is read from and the `revision`
+# value the children inherit), which is how a branch is tried on a live stand
+# before it is merged.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sock-shop-root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Dudnique/sock_shop.git
+    targetRevision: main
+    path: deploy/kubernetes/argocd/apps
+    helm:
+      parameters:
+        - name: revision
+          value: main
+        # deploy.ps1 -WithAIOps / -WithLoadtest turn these to "true" before applying.
+        - name: aiops.enabled
+          value: "false"
+        - name: loadtest.enabled
+          value: "false"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

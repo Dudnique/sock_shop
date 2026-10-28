@@ -1,0 +1,63 @@
+# What runs on the stand, as data. Each entry is one Argo CD Application; its
+# `path` is the directory `deploy.ps1` applies for the same step, and
+# `check-apps.py` (run by CI) fails when a directory is applied by the script
+# and has no entry here - so the two ways of deploying cannot drift apart.
+
+repoURL: https://github.com/Dudnique/sock_shop.git
+# Overridden by the root Application (deploy.ps1 -GitRevision).
+revision: main
+
+# Optional components: off unless deploy.ps1 -WithAIOps / -WithLoadtest turned
+# them on in root-app.yaml.
+aiops:
+  enabled: false
+loadtest:
+  enabled: false
+
+# `wave` orders the Applications (lower first), mirroring the order of deploy.ps1:
+# the application and its network policies, then autoscaling and the log and
+# trace backends, then monitoring and alerting, then the optional parts.
+apps:
+  - name: sock-shop
+    path: deploy/kubernetes/helm-chart
+    namespace: sock-shop
+    wave: 0
+    helm: true
+    # The HPAs own `spec.replicas`. Without this Argo CD sees every scaled
+    # Deployment as drift and, with selfHeal, scales it back - a fight with the
+    # autoscaler that the chart's own install already hit with Helm (FIXES 25).
+    ignoreReplicas: true
+  - name: network-policies
+    path: deploy/kubernetes/manifests-policy
+    namespace: sock-shop
+    wave: 0
+  - name: autoscaling
+    path: deploy/kubernetes/autoscaling
+    namespace: sock-shop
+    wave: 1
+  - name: logging
+    path: deploy/kubernetes/manifests-logging
+    namespace: logging
+    wave: 1
+  - name: tracing
+    path: deploy/kubernetes/manifests-jaeger
+    namespace: jaeger
+    wave: 1
+  - name: monitoring
+    path: deploy/kubernetes/manifests-monitoring
+    namespace: monitoring
+    wave: 2
+  - name: alerting
+    path: deploy/kubernetes/manifests-alerting
+    namespace: monitoring
+    wave: 2
+  - name: aiops
+    path: deploy/kubernetes/manifests-aiops
+    namespace: monitoring
+    wave: 3
+    flag: aiops
+  - name: loadtest
+    path: deploy/kubernetes/manifests-loadtest
+    namespace: loadtest
+    wave: 3
+    flag: loadtest

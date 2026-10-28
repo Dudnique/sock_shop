@@ -1,0 +1,63 @@
+{{- /*
+One Application per entry of .Values.apps. The sync policy is the same for all:
+automated, with prune and selfHeal, so git is the source of truth and a manual
+`kubectl edit` is undone. Secrets are not in git (deploy.ps1 creates them), so
+prune cannot touch them: Argo CD only ever deletes what it tracks.
+*/ -}}
+{{- range .Values.apps }}
+{{- $on := true }}
+{{- if .flag }}{{ $on = index $.Values .flag "enabled" }}{{ end }}
+{{- if $on }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .name }}
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .wave | quote }}
+spec:
+  project: default
+  source:
+    repoURL: {{ $.Values.repoURL }}
+    targetRevision: {{ $.Values.revision }}
+    path: {{ .path }}
+    {{- if .helm }}
+    helm:
+      releaseName: {{ .name }}
+    {{- end }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .namespace }}
+  {{- if .ignoreReplicas }}
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+  {{- end }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # Server-side: some ConfigMaps here (Grafana dashboards, the Prometheus
+      # rules) are close to the 256 KiB limit of the last-applied annotation that
+      # client-side apply writes.
+      - ServerSideApply=true
+      # Re-apply only what changed; an unchanged Job or Deployment is left alone.
+      - ApplyOutOfSyncOnly=true
+      {{- if .ignoreReplicas }}
+      - RespectIgnoreDifferences=true
+      {{- end }}
+    # A Secret that deploy.ps1 creates a moment later, or a Deployment whose
+    # dependency is not up yet, fails the first sync; trying again is the cure.
+    retry:
+      limit: 8
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 3m
+{{- end }}
+{{- end }}

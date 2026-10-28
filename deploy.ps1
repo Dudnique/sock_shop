@@ -16,6 +16,12 @@
 #      is built here, imported into the k3d node and the manifests applied.
 #   It prints the resulting URLs.
 #
+# GITOPS MODE (-GitOps): steps 2-7 are not run by this script. It creates the
+# cluster and the secrets (which are not in git), installs Argo CD with Helm and
+# applies one root Application; Argo CD then deploys every directory from this
+# repository (deploy\kubernetes\argocd). -GitRevision <branch> makes it read a
+# branch instead of main, which is how a change is tried before it is merged.
+#
 # The cluster is deliberately NOT created with `k3d cluster create` here: that
 # would duplicate terraform/k3d and let the two definitions drift apart.
 #
@@ -41,6 +47,7 @@
 #          .\deploy.ps1 -WithLoadtest # ...and start the load generator
 #          .\deploy.ps1 -WithAIOps    # ...and deploy the AIOps triage bot
 #          .\deploy.ps1 -Helm         # ...and install the application from the Helm chart
+#          .\deploy.ps1 -GitOps      # Argo CD deploys everything from git (see below)
 #          .\deploy.ps1 -Down         # tear it down
 # ---------------------------------------------------------------------------
 [CmdletBinding()]
@@ -68,7 +75,15 @@ param(
     # chart is a second copy of the same objects, so change both), and the chart
     # can only be installed into a cluster where those objects are not already
     # owned by an earlier `kubectl apply` (helm refuses to adopt them).
-    [switch]$Helm
+    [switch]$Helm,
+    # Optional: let Argo CD deploy the stand from git instead of this script
+    # applying the manifests (deploy\kubernetes\argocd). The cluster, the secrets
+    # and the AIOps image are still created here - they are not in git. The
+    # application comes from the Helm chart, so -Helm is not needed (and refused).
+    [switch]$GitOps,
+    # The branch or tag Argo CD reads in -GitOps mode. `main` unless a change is
+    # being tried on a live stand before it is merged.
+    [string]$GitRevision = "main"
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,10 +92,17 @@ $ErrorActionPreference = "Stop"
 # the default here, in the script body (where it is always available).
 if (-not $TfDir) { $TfDir = Join-Path $PSScriptRoot "terraform\k3d" }
 
-foreach ($tool in @("terraform", "docker", "kubectl") + $(if ($Helm) { @("helm") } else { @() })) {
+foreach ($tool in @("terraform", "docker", "kubectl") + $(if ($Helm -or $GitOps) { @("helm") } else { @() })) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "Tool '$tool' not found in PATH. Install it and retry."
     }
+}
+
+if ($GitOps -and $Helm) {
+    throw "-GitOps already deploys the application from the Helm chart; drop -Helm."
+}
+if ($GitOps -and $WithLoadtest -and -not $Down) {
+    Write-Host "    -WithLoadtest in GitOps mode turns the loadtest Application on; it is not applied by this script." -ForegroundColor Yellow
 }
 
 # --- Native-command probes --------------------------------------------------
@@ -291,7 +313,9 @@ if ($k3dContainers.Count -gt 0) {
 # Two interchangeable ways to create the same application objects. -Helm switches
 # only this step, so network policies, autoscalers, logging, tracing, monitoring,
 # alerting and the bot below are applied from the raw manifests either way.
-if ($Helm) {
+if ($GitOps) {
+    Write-Host "==> 2/8 Application: left to Argo CD (GitOps mode)" -ForegroundColor Cyan
+} elseif ($Helm) {
     Write-Host "==> 2/8 Application (sock-shop, Helm chart)" -ForegroundColor Cyan
     $chart = Join-Path $PSScriptRoot "deploy\kubernetes\helm-chart"
     # --wait because the rest of the script assumes a working application, and the
@@ -338,7 +362,9 @@ if ($Helm) {
 # applied by accident. Verification is a separate, explicit step:
 #   .\deploy\kubernetes\manifests-policy\verify-netpol.ps1
 Write-Host "==> 3/8 Network policies (manifests-policy)" -ForegroundColor Cyan
-kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-policy")
+if (-not $GitOps) {
+    kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-policy")
+}
 
 # --- 4. Autoscaling (HPA v2) ------------------------------------------------
 # Two prerequisites, and both are worth stating because the stand used to have
@@ -349,6 +375,7 @@ kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-policy")
 # leaving eight dead autoscalers behind, which is how this repository looked
 # before: 8 manifests, 0 HPAs in the cluster.
 Write-Host "==> 4/8 Autoscaling (HPA v2)" -ForegroundColor Cyan
+if (-not $GitOps) {
 kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\autoscaling")
 
 $hpaDeadline = (Get-Date).AddMinutes(2)
@@ -368,16 +395,17 @@ if (-not $hpaMetricsReady) {
     throw "No HPA reported CPU metrics within 2 minutes. HPA needs metrics-server (k3s ships it) and requests.cpu on the target pods; without both, the objects exist but never scale."
 }
 Write-Host "    HPA metrics are flowing (metrics-server reachable)." -ForegroundColor Green
+}
 
 # --- 5. Logging (Loki + Promtail) -------------------------------------------
 # Applied after the application on purpose: Promtail tails the log files of the
 # pods that are already running, so Loki starts collecting immediately.
 Write-Host "==> 5/8 Logging (Loki + Promtail)" -ForegroundColor Cyan
-kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-logging")
+if (-not $GitOps) { kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-logging") }
 
 # --- 6. Tracing (Jaeger) ----------------------------------------------------
 Write-Host "==> 6/8 Tracing (Jaeger)" -ForegroundColor Cyan
-kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-jaeger")
+if (-not $GitOps) { kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-jaeger") }
 
 # --- 7. Monitoring ----------------------------------------------------------
 Write-Host "==> 7/8 Monitoring" -ForegroundColor Cyan
@@ -385,7 +413,9 @@ Write-Host "==> 7/8 Monitoring" -ForegroundColor Cyan
 # The dashboard/datasource import is a one-shot Job and a Job spec is immutable,
 # so a plain re-apply of an existing Job fails. Delete the finished Job first:
 # the import then always runs against the current configmap.
-kubectl -n monitoring delete job grafana-import-dashboards --ignore-not-found | Out-Null
+if (-not $GitOps) {
+    kubectl -n monitoring delete job grafana-import-dashboards --ignore-not-found | Out-Null
+}
 
 # Grafana's admin credentials are NOT in the manifests any more: both the
 # Deployment and the import Job read them from the `grafana-admin` Secret. Two
@@ -420,7 +450,7 @@ kubectl -n monitoring create secret generic grafana-admin `
     --from-literal=admin-password=$grafanaPassword `
     --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-monitoring")
+if (-not $GitOps) { kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-monitoring") }
 
 # --- 8. Alerting ------------------------------------------------------------
 Write-Host "==> 8/8 Alerting" -ForegroundColor Cyan
@@ -465,7 +495,7 @@ if ($env:TELEGRAM_BOT_TOKEN -and $env:SLACK_WEBHOOK_URL) {
 
 # note: examples/ is a sub-directory, and `kubectl apply -f <dir>` is NOT
 # recursive, so the *.example.yaml files inside it are intentionally ignored.
-kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-alerting")
+if (-not $GitOps) { kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-alerting") }
 
 # --- Prometheus rules: wait for the file, validate it, reload ---------------
 # Three facts make this non-trivial:
@@ -481,6 +511,7 @@ kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-alerting"
 #     keeps running WITHOUT those alerts - a silent monitoring gap. So the
 #     mounted file is validated with promtool (the binary of the very same
 #     image/version that runs the server) before anything is reloaded.
+if (-not $GitOps) {
 $rulesMarker = 'name: availability'   # a group name only the new file has
 $rulesDeadline = (Get-Date).AddMinutes(3)
 $rulesReady = $false
@@ -510,12 +541,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "POST /-/reload failed - check --web.enable-lifecycle in 06-prometheus-dep.yaml."
 }
 Write-Host "    Rules reloaded (no restart: metric history kept)." -ForegroundColor Green
+}
 
 # --- 7. Load generator (optional) -------------------------------------------
 # Deliberately optional: two k6 pods hammering front-end are noise in a
 # training cluster, but they are exactly what makes the dashboards, the alert
 # rules and the traces non-empty (see manifests-loadtest/loadtest-dep.yaml).
-if ($WithLoadtest) {
+if ($WithLoadtest -and -not $GitOps) {
     Write-Host "==> load generator (manifests-loadtest)" -ForegroundColor Cyan
     kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-loadtest")
     kubectl -n loadtest rollout status deploy/load-test --timeout=120s | Out-Null
@@ -591,9 +623,70 @@ if ($WithAIOps) {
 
     # note: examples/ is a sub-directory, and `kubectl apply -f <dir>` is NOT
     # recursive, so examples/triage-bot-secret.example.yaml is never applied.
-    kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-aiops")
-    kubectl -n monitoring rollout status deploy/triage-bot --timeout=180s | Out-Null
-    Write-Host "    triage-bot is Ready (listening on triage-bot.monitoring.svc.cluster.local:8080)." -ForegroundColor Green
+    if (-not $GitOps) {
+        kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-aiops")
+        kubectl -n monitoring rollout status deploy/triage-bot --timeout=180s | Out-Null
+        Write-Host "    triage-bot is Ready (listening on triage-bot.monitoring.svc.cluster.local:8080)." -ForegroundColor Green
+    } else {
+        Write-Host "    Image and Secret are in place; Argo CD applies manifests-aiops below." -ForegroundColor Green
+    }
+}
+
+# --- GitOps: Argo CD and the app-of-apps ------------------------------------
+# Everything above that git cannot hold (the cluster, the three Secrets, the bot
+# image) exists by now. What is left is to hand the rest to Argo CD: install it,
+# give it one root Application, and wait for it to make the stand match git.
+if ($GitOps) {
+    Write-Host "==> GitOps: Argo CD and the app-of-apps (revision: $GitRevision)" -ForegroundColor Cyan
+    $argoDir = Join-Path $PSScriptRoot "deploy\kubernetes\argocd"
+
+    # Pinned, like every other version on this stand: argo-cd chart 10.11.6 is
+    # Argo CD v3.5.6. --wait returns when the four components are available.
+    helm repo add argo https://argoproj.github.io/argo-helm --force-update | Out-Null
+    helm upgrade --install argocd argo/argo-cd --version 10.11.6 `
+        --namespace argocd --create-namespace `
+        -f (Join-Path $argoDir "values.yaml") --wait --timeout 10m
+    if ($LASTEXITCODE -ne 0) { throw "helm upgrade --install argocd failed (exit $LASTEXITCODE)" }
+
+    # The root Application is a file in git; only the revision and the two
+    # optional components are filled in here. The patterns are narrow on purpose:
+    # each matches the one line it is meant to change and fails loudly (below)
+    # if the file ever stops containing it.
+    $root = Get-Content (Join-Path $argoDir "root-app.yaml") -Raw
+    $root = $root -replace 'targetRevision: main', "targetRevision: $GitRevision"
+    $root = $root -replace '(name: revision\s+value: )main', "`$1$GitRevision"
+    if ($WithAIOps) { $root = $root -replace '(name: aiops\.enabled\s+value: )"false"', '$1"true"' }
+    if ($WithLoadtest) { $root = $root -replace '(name: loadtest\.enabled\s+value: )"false"', '$1"true"' }
+    if ($root -notmatch "targetRevision: $([regex]::Escape($GitRevision))") {
+        throw "root-app.yaml does not contain the revision after substitution - check the patterns in deploy.ps1"
+    }
+    $root | kubectl apply -f -
+    if ($LASTEXITCODE -ne 0) { throw "applying the root Application failed (exit $LASTEXITCODE)" }
+
+    # The root plus one Application per entry of apps/values.yaml (7 always, the
+    # bot and the load generator when asked for).
+    $expectedApps = 1 + 7 + $(if ($WithAIOps) { 1 } else { 0 }) + $(if ($WithLoadtest) { 1 } else { 0 })
+    Write-Host "    Waiting for $expectedApps Applications to be Synced and Healthy (a first sync takes about 15 minutes: the JVM services start their readiness checks at 360-420 s)..." -ForegroundColor Cyan
+    $gitopsDeadline = (Get-Date).AddMinutes(40)
+    $lastReport = ""
+    $allGreen = $false
+    while ((Get-Date) -lt $gitopsDeadline) {
+        $raw = kubectl -n argocd get applications -o json 2>$null
+        if ($LASTEXITCODE -eq 0 -and $raw) {
+            $items = @(($raw | ConvertFrom-Json).items)
+            $report = ($items | Sort-Object { $_.metadata.name } | ForEach-Object {
+                "{0}={1}/{2}" -f $_.metadata.name, $_.status.sync.status, $_.status.health.status
+            }) -join "  "
+            if ($report -ne $lastReport) { Write-Host "    $report"; $lastReport = $report }
+            $green = @($items | Where-Object { $_.status.sync.status -eq "Synced" -and $_.status.health.status -eq "Healthy" })
+            if ($items.Count -ge $expectedApps -and $green.Count -eq $items.Count) { $allGreen = $true; break }
+        }
+        Start-Sleep -Seconds 20
+    }
+    if (-not $allGreen) {
+        throw "Argo CD Applications are not all Synced and Healthy after 40 minutes. See: kubectl -n argocd get applications"
+    }
+    Write-Host "    All Applications are Synced and Healthy." -ForegroundColor Green
 }
 
 # --- Summary ----------------------------------------------------------------
@@ -628,4 +721,11 @@ if ($grafanaPasswordGenerated) {
     # Secret is base64, the Service is ClusterIP, and the UI needs a hosts entry).
     # Set GRAFANA_ADMIN_PASSWORD to pick your own value instead.
     Write-Host ("    Grafana admin password (from the existing grafana-admin Secret): {0}" -f $grafanaPassword) -ForegroundColor Yellow
+}
+if ($GitOps) {
+    $argoPassword = Get-ClusterSecretValue -Namespace argocd -SecretName argocd-initial-admin-secret -Key password
+    Write-Host ("  Argo CD     http://argocd.localhost:{0}   (login: admin)" -f $ingressPort)
+    Write-Host  "              needs '127.0.0.1 argocd.localhost' in your hosts file; without it:"
+    Write-Host  "              kubectl port-forward -n argocd svc/argocd-server 8090:80  ->  http://localhost:8090"
+    Write-Host ("    Argo CD admin password (argocd-initial-admin-secret): {0}" -f $argoPassword) -ForegroundColor Yellow
 }
