@@ -712,8 +712,15 @@ if ($GitOps) {
     $lastReport = ""
     $allGreen = $false
     while ((Get-Date) -lt $gitopsDeadline) {
-        $raw = kubectl -n argocd get applications -o json 2>$null
-        if ($LASTEXITCODE -eq 0 -and $raw) {
+        # Invoke-QuietProbe, not a bare `kubectl ... 2>$null`: while 40+ pods start,
+        # the k3d API server now and then misses a request ("TLS handshake
+        # timeout"), and under $ErrorActionPreference = "Stop" Windows PowerShell 5.1
+        # turns that single line of stderr into a terminating error that killed a
+        # deploy whose twelve Applications were all healthy. A missed poll is not a
+        # failure; the next one (20 s later) will answer.
+        $probe = Invoke-QuietProbe -Arguments @("-n", "argocd", "get", "applications", "-o", "json")
+        $raw = $probe.Output
+        if ($probe.ExitCode -eq 0 -and $raw) {
             $items = @(($raw | ConvertFrom-Json).items)
             $report = ($items | Sort-Object { $_.metadata.name } | ForEach-Object {
                 "{0}={1}/{2}" -f $_.metadata.name, $_.status.sync.status, $_.status.health.status
