@@ -145,6 +145,18 @@ class MockAdapter(Adapter):
         "DeploymentReplicasUnavailable": ("replicas_available", "replicas_desired"),
     }
 
+    #: Pod-level alerts and the method that re-checks each one. Unlike PREMISES
+    #: these cannot be written as "lower < upper": CrashLoopBackOff is a reason
+    #: name, and a restart count is compared with the rule's own threshold.
+    POD_PREMISES = {
+        "PodCrashLooping": "_crashloop_conflict",
+        "PodRestartFlapping": "_flapping_conflict",
+    }
+
+    #: `increase(kube_pod_container_status_restarts_total[15m]) > 3` in
+    #: 05-prometheus-alertrules.yaml; tests/test_coverage.py fails if they differ.
+    FLAPPING_RESTARTS_THRESHOLD = 3
+
     DEFAULT = ("escalate_human", 0.40,
                "Такой алерт не описан в правилах мока: безопасный шаг не очевиден.")
 
@@ -177,7 +189,10 @@ class MockAdapter(Adapter):
         labels = alert.get("labels") or {}
         alertname = labels.get("alertname", "")
         namespace = labels.get("namespace") or "sock-shop"
-        deployment = (labels.get("deployment") or labels.get("deployment_name") or "")
+        # The alert may name only a pod; the context then carries the Deployment
+        # that owns it, resolved from kube-state-metrics (context.resolve_deployment).
+        deployment = (labels.get("deployment") or labels.get("deployment_name")
+                      or (context.get("resolved") or {}).get("deployment", ""))
         action_id, confidence, reason = self.RULES.get(alertname, self.DEFAULT)
         evidence = self._evidence(context)
 
@@ -216,8 +231,8 @@ class MockAdapter(Adapter):
                 "confidence": 0.5,
                 "reason": (
                     f"Алерт {alertname} не подтверждается метриками ({conflict}): "
-                    "состояние уже соответствует желаемому, автоматический шаг "
-                    "ничего не исправит - решение за человеком."),
+                    "того, на что указывает алерт, сейчас не видно, автоматический "
+                    "шаг ничего не исправит - решение за человеком."),
                 "evidence": evidence,
             }
 
@@ -275,12 +290,55 @@ class MockAdapter(Adapter):
                     return None
         return None
 
+    @staticmethod
+    def _pod_fact(context: dict, prefix: str):
+        """`(found, value)` for the per-pod query `prefix[...]`.
+
+        `found` is False when the query did not answer at all (a failure, or it
+        was never asked) - which is "not verifiable". An answer with no series is
+        `(True, None)`, which IS information: the pod is not in that state.
+        """
+        for key, value in (context.get("prometheus") or {}).items():
+            if key.startswith(f"{prefix}["):
+                return True, value
+        if any(key.startswith(f"{prefix}[") for key in (context.get("empty") or [])):
+            return True, None
+        return False, None
+
+    def _crashloop_conflict(self, context: dict) -> str:
+        found, value = self._pod_fact(context, "pod_waiting_reasons")
+        if not found:
+            return ""
+        if value is None:
+            return "no container of the pod is in a waiting state"
+        if "CrashLoopBackOff" not in value:
+            return f"pod_waiting_reasons = {value}, not CrashLoopBackOff"
+        return ""
+
+    def _flapping_conflict(self, context: dict) -> str:
+        found, value = self._pod_fact(context, "pod_restarts_15m")
+        if not found:
+            return ""
+        if value is None:
+            return "no restart series for the pod in the last 15m"
+        try:
+            restarts = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if restarts <= self.FLAPPING_RESTARTS_THRESHOLD:
+            return (f"pod_restarts_15m = {restarts:g}, the rule needs more than "
+                    f"{self.FLAPPING_RESTARTS_THRESHOLD}")
+        return ""
+
     def _premise_conflict(self, context: dict, alertname: str) -> str:
         """How this alert is contradicted by live metrics, or "" if it is not.
 
         Deliberately asymmetric: only a contradiction is reported. No metric at
         all means "not verifiable", which is not the same as "not happening".
         """
+        pod_check = self.POD_PREMISES.get(alertname)
+        if pod_check:
+            return getattr(self, pod_check)(context)
         premise = self.PREMISES.get(alertname)
         if not premise:
             return ""

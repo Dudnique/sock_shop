@@ -1877,4 +1877,46 @@ perfectly healthy, and the rules still proposed the restart at 0.80: the check "
 true" exists only for `DeploymentReplicasUnavailable`. `PodCrashLooping` and `PodRestartFlapping` are
 taken at their word. It is an advisor today, so a human sees the card first, but the context does not
 yet tell "the query returned nothing" from "the query failed", and that distinction is what a safe
-premise check needs (TODO, section 2).
+premise check needs (TODO, section 2). **Corrected in section 29:** the real rules send no
+`deployment` label, so this case was reachable only with a hand-made alert.
+
+## 29. The bot that could not propose anything for a pod, and a premise check that asked the wrong moment
+
+**A correction to section 28.** Section 28 says the rules proposed a restart for a healthy
+`catalogue` at 0.80. That was true for a test alert I had given a `deployment` label by hand. The
+shipped `PodCrashLooping` and `PodRestartFlapping` rules send `pod` and `container` and no
+`deployment`; re-run with exactly those labels, the bot escalated with "no deployment label". So the
+real defect was the opposite one: for the most common kind of incident the bot could not propose
+anything at all, and the premise check I had written down as missing could not even be reached.
+
+**Fix, in two steps.**
+1. `resolve_deployment()` in `triage_bot/context.py` finds the Deployment through
+   `kube_pod_owner` and `kube_replicaset_owner` (both present on this stand) instead of parsing the
+   pod name, and puts it into the context as the first fact of the card. The pod name is validated
+   against DNS-1123 before it is placed in a PromQL string.
+2. `MockAdapter.POD_PREMISES` re-checks the two pod alerts against live series before any action:
+   `PodCrashLooping` needs `CrashLoopBackOff` in the last 5 minutes, `PodRestartFlapping` needs more
+   than 3 restarts in 15 minutes (the number is read from the rule file by a test, so the two cannot
+   drift). To make that safe the context now keeps "the query answered with no series" (evidence
+   against the alert) apart from "the query failed" (no evidence, does not block).
+
+**What the live run found that the unit tests could not.** The first version asked "is the pod in
+`CrashLoopBackOff` right now" and refused a pod that was crash-looping: at two minutes of age the
+container leaves the waiting state for a moment on every attempt, and the instant query landed in
+that moment (`kube_pod_container_status_waiting` was 0, the pod was in `Error`). The unit tests were
+green, because they feed the adapter the answer they expect. The look-back of 5 minutes fixed it.
+The rule itself waits 10 minutes, where the back-off is at its 5-minute cap and the window is
+rarely missed, so this would have shown up as an occasional wrong refusal, which errs on the safe
+side; it is still wrong, and now it is covered.
+
+**Result, live (a Deployment that really crash-loops, and a healthy one):**
+
+| Alert | Pod | Tier 0 |
+| ----- | --- | ------ |
+| `PodCrashLooping` | crash-looping `crashy` | `restart_deployment`, `kubectl -n sock-shop rollout restart deployment/crashy` |
+| `PodRestartFlapping` | crash-looping `crashy` | `restart_deployment` for the same Deployment |
+| `PodCrashLooping` | healthy `catalogue` | `escalate_human`: no container of the pod is in a waiting state |
+| `PodRestartFlapping` | healthy `catalogue` | `escalate_human`: `pod_restarts_15m = 0`, the rule needs more than 3 |
+
+Tests: 156 (was 136), all standard library. Not covered: a pod whose owner is not a Deployment (a
+Job, a StatefulSet) is reported as a named gap and escalates; there is no tier-0 action for it.

@@ -116,6 +116,9 @@ class MockAdapterTests(unittest.TestCase):
     def test_premise_checks_point_at_real_tier0_decisions(self) -> None:
         for name in MockAdapter.PREMISES:
             self.assertIn(name, MockAdapter.RULES, name)
+        for name, method in MockAdapter.POD_PREMISES.items():
+            self.assertIn(name, MockAdapter.RULES, name)
+            self.assertTrue(callable(getattr(MockAdapter, method)), method)
 
     def test_the_whole_table_is_self_consistent(self) -> None:
         from triage_bot.model import ACTIONS
@@ -309,6 +312,89 @@ class BuildAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.base_url, "https://api.deepseek.com/v1")
         self.assertEqual(adapter.model, "deepseek-chat")
         self.assertEqual(settings.llm_api_key(), "sk-live-test")
+
+
+
+POD = "catalogue-67b8dccb79-kmbhk"
+
+
+def pod_alert(name: str) -> dict:
+    """What the shipped rule really sends: a pod and a container, no deployment."""
+    return {"status": "firing", "annotations": {},
+            "labels": {"alertname": name, "namespace": "sock-shop", "pod": POD,
+                       "container": "catalogue"}}
+
+
+def pod_context(**facts) -> dict:
+    """A context for the pod alerts; `empty=[...]` lists queries that answered nothing."""
+    empty = facts.pop("empty", [])
+    return {"prometheus": {f"{key}[{POD}]": value for key, value in facts.items()},
+            "loki": [], "missing": [], "empty": [f"{key}[{POD}]" for key in empty],
+            "resolved": {"deployment": "catalogue"}}
+
+
+class PodAlertPremiseTests(unittest.TestCase):
+    """PodCrashLooping / PodRestartFlapping: act only while the alert is still true."""
+
+    def setUp(self) -> None:
+        self.adapter = MockAdapter(make_settings())
+
+    def test_a_pod_alert_acts_on_the_resolved_deployment(self) -> None:
+        """Before, "no deployment label" sent every pod alert to a human."""
+        payload = self.adapter.decision_for(
+            pod_alert("PodCrashLooping"),
+            pod_context(pod_waiting_reasons="CrashLoopBackOff=1"))
+        self.assertEqual(payload["action_id"], "restart_deployment")
+        self.assertEqual(payload["params"], {"namespace": "sock-shop",
+                                             "deployment": "catalogue"})
+
+    def test_without_a_resolved_deployment_it_still_escalates(self) -> None:
+        context = pod_context(pod_waiting_reasons="CrashLoopBackOff=1")
+        context["resolved"] = {}
+        payload = self.adapter.decision_for(pod_alert("PodCrashLooping"), context)
+        self.assertEqual(payload["action_id"], "escalate_human")
+        self.assertIn("метки deployment", payload["reason"])
+
+    def test_crashloop_on_a_pod_that_is_not_waiting_is_refused(self) -> None:
+        payload = self.adapter.decision_for(
+            pod_alert("PodCrashLooping"), pod_context(empty=["pod_waiting_reasons"]))
+        self.assertEqual(payload["action_id"], "escalate_human")
+        self.assertIn("no container of the pod is in a waiting state", payload["reason"])
+
+    def test_crashloop_with_another_waiting_reason_is_refused(self) -> None:
+        payload = self.adapter.decision_for(
+            pod_alert("PodCrashLooping"),
+            pod_context(pod_waiting_reasons="ContainerCreating=1"))
+        self.assertEqual(payload["action_id"], "escalate_human")
+        self.assertIn("not CrashLoopBackOff", payload["reason"])
+
+    def test_crashloop_is_not_blocked_by_a_query_that_failed(self) -> None:
+        """No answer at all is "not verifiable", not "not happening"."""
+        payload = self.adapter.decision_for(pod_alert("PodCrashLooping"), pod_context())
+        self.assertEqual(payload["action_id"], "restart_deployment")
+
+    def test_flapping_below_the_rule_threshold_is_refused(self) -> None:
+        payload = self.adapter.decision_for(
+            pod_alert("PodRestartFlapping"), pod_context(pod_restarts_15m="2"))
+        self.assertEqual(payload["action_id"], "escalate_human")
+        self.assertIn("pod_restarts_15m = 2", payload["reason"])
+
+    def test_flapping_exactly_at_the_threshold_is_refused(self) -> None:
+        """The rule says "> 3", so 3 does not satisfy it."""
+        payload = self.adapter.decision_for(
+            pod_alert("PodRestartFlapping"), pod_context(pod_restarts_15m="3"))
+        self.assertEqual(payload["action_id"], "escalate_human")
+
+    def test_flapping_above_the_threshold_is_acted_on(self) -> None:
+        payload = self.adapter.decision_for(
+            pod_alert("PodRestartFlapping"), pod_context(pod_restarts_15m="5"))
+        self.assertEqual(payload["action_id"], "restart_deployment")
+
+    def test_flapping_for_a_pod_with_no_series_is_refused(self) -> None:
+        payload = self.adapter.decision_for(
+            pod_alert("PodRestartFlapping"), pod_context(empty=["pod_restarts_15m"]))
+        self.assertEqual(payload["action_id"], "escalate_human")
+        self.assertIn("no restart series", payload["reason"])
 
 
 if __name__ == "__main__":
