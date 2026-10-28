@@ -6,6 +6,7 @@ metadata:
 data:
   alert.rules: |-
     # Alerting rules for the Sock Shop stand.
+    # (gitops test line - reverted right after)
     #
     # Design notes:
     #  * Rules are grouped by WHAT THEY PROTECT (availability / application /
