@@ -190,10 +190,12 @@ $env:GRAFANA_ADMIN_PASSWORD = '<пароль>'
 вставляется руками и ничего не вводится в командной строке.
 
 **В режиме GitOps** (`deploy.ps1 -GitOps`) читается тот же файл, но Secret создаёт не
-скрипт: `deploy\vault-seed.ps1` записывает значения в Vault (под в кластере, dev-режим), а
+скрипт: `deploy\vault-seed.ps1` записывает значения в Vault (под в кластере, данные на томе), а
 External Secrets превращает их в Kubernetes Secret. Файл по-прежнему единственное место, где
-вы храните значения. Перезапуск Vault его опустошает (dev-режим), и лечится это одной
-командой, `.\deploy\vault-seed.ps1`. Как это устроено:
+вы храните значения. Ключ распечатки и корневой токен Vault создаются при первом запуске и
+сохраняются в `deploy\vault-init.local.json` (в git не попадает; сохраните копию). Перезапуск
+Vault оставляет данные, но запечатывает его, и лечится это одной командой,
+`.\deploy\vault-seed.ps1 -UnsealOnly`. Как это устроено:
 [`deploy/kubernetes/manifests-secrets/README.ru.md`](deploy/kubernetes/manifests-secrets/README.ru.md).
 
 ## Ручное развёртывание (без скрипта)

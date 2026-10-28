@@ -71,17 +71,23 @@ $script:RootToken = $null
 # calls made before a token exists (status, init, unseal).
 $script:VaultExit = 0
 function Invoke-Vault {
-    param([string[]]$VaultArgs, [string]$Stdin, [switch]$AllowFailure, [switch]$NoToken)
+    param([string[]]$VaultArgs, [string]$Stdin, [switch]$AllowFailure, [switch]$NoToken, [switch]$UnsealKeyOnStdin)
     $withToken = (-not $NoToken) -and $script:RootToken
     if ($withToken) {
         $Stdin = $script:RootToken + "`n" + $(if ($PSBoundParameters.ContainsKey("Stdin")) { $Stdin } else { "" })
     }
-    $hasStdin = $withToken -or $PSBoundParameters.ContainsKey("Stdin")
+    $hasStdin = $withToken -or $UnsealKeyOnStdin -or $PSBoundParameters.ContainsKey("Stdin")
     $all = @("-n", $Namespace, "exec")
     if ($hasStdin) { $all += "-i" }
     if ($withToken) {
         $all += @("-c", "vault", $Pod, "--", "sh", "-c",
             'IFS= read -r VAULT_TOKEN; export VAULT_TOKEN; exec vault "$@"', "sh") + $VaultArgs
+    } elseif ($UnsealKeyOnStdin) {
+        # `vault operator unseal` takes the key as an argument (it does not read "-"),
+        # so it is read from stdin by a wrapper inside the pod: on this side the key
+        # is never on a command line.
+        $all += @("-c", "vault", $Pod, "--", "sh", "-c",
+            'IFS= read -r K; exec vault operator unseal "$K"')
     } else {
         $all += @("-c", "vault", $Pod, "--", "vault") + $VaultArgs
     }
@@ -157,7 +163,7 @@ if (-not (Test-Path $initFile)) {
 $init = Get-Content $initFile -Raw | ConvertFrom-Json
 $script:RootToken = $init.root_token
 if ($status.sealed) {
-    Invoke-Vault -VaultArgs @("operator", "unseal", "-") -Stdin $init.unseal_keys_b64[0] -NoToken | Out-Null
+    Invoke-Vault -VaultArgs @("operator", "unseal") -Stdin ($init.unseal_keys_b64[0] + "`n") -NoToken -UnsealKeyOnStdin | Out-Null
     Write-Host "    Vault unsealed."
 }
 # After the unseal a single Raft node needs a few seconds to elect itself leader;
@@ -174,7 +180,14 @@ if ($UnsealOnly) {
     return
 }
 
-# --- 1. Kubernetes auth ------------------------------------------------------
+# --- 1. Secrets engine and Kubernetes auth -----------------------------------
+# Dev mode mounted a key-value store (version 2) at secret/ by itself; a real
+# Vault starts with none.
+$mounts = Invoke-Vault -VaultArgs @("secrets", "list", "-format=json")
+if ($mounts -notmatch '"secret/"') {
+    Invoke-Vault -VaultArgs @("secrets", "enable", "-path=secret", "-version=2", "kv") | Out-Null
+    Write-Host "    Key-value store (v2) enabled at secret/."
+}
 $auth = Invoke-Vault -VaultArgs @("auth", "list", "-format=json")
 if ($auth -notmatch '"kubernetes/"') {
     Invoke-Vault -VaultArgs @("auth", "enable", "kubernetes") | Out-Null

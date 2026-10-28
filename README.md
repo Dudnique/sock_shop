@@ -188,9 +188,11 @@ nothing is pasted anywhere and nothing is typed on a command line.
 
 **In GitOps mode** (`deploy.ps1 -GitOps`) the same file is read, but the Secrets are not
 created by the script: `deploy\vault-seed.ps1` writes the values into Vault (a pod in the
-cluster, dev mode), and External Secrets turns them into the Kubernetes Secrets. The file
-is still the only place you keep the values. A Vault restart empties it (dev mode), and
-the cure is one command, `.\deploy\vault-seed.ps1`. How it works:
+cluster, data on a volume), and External Secrets turns them into the Kubernetes Secrets.
+The file is still the only place you keep the values. Vault's unseal key and root token
+are created at the first start and saved in `deploy\vault-init.local.json` (git-ignored;
+keep a copy). A Vault restart keeps the data but leaves it sealed, and the cure is one
+command, `.\deploy\vault-seed.ps1 -UnsealOnly`. How it works:
 [`deploy/kubernetes/manifests-secrets/README.md`](deploy/kubernetes/manifests-secrets/README.md).
 
 ## Manual deployment (without the script)
