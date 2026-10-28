@@ -2090,3 +2090,31 @@ margin, and the VM has wedged on exactly that kind of margin before (section 22)
 token. A real one is HA Raft storage, auto-unseal and no static root token. Nothing alerts when an
 `ExternalSecret` is in error (for example after a Vault restart): the Secrets keep working, but they stop
 being refreshed in silence - the same shape of gap as section 31, and the next thing to close (TODO).
+
+## 33. Secrets that stop refreshing in silence: the alert for an ExternalSecret that is not syncing
+
+**The gap section 32 left.** When Vault is restarted (dev mode forgets everything) the Secrets already in
+the cluster keep working - `deletionPolicy: Retain` - so nothing breaks, but they stop being refreshed:
+a rotated token never arrives, and nothing says so. The same shape of gap as section 31, a failure that
+looks like success.
+
+**Fix.** External Secrets now exposes its metrics through a Service annotated the way the existing
+`kubernetes-service-endpoints` job of Prometheus looks for targets (`metrics.service` in the chart values
+of `argocd/apps/values.yaml`), and the new rule **`ExternalSecretNotReady`**
+(`externalsecret_status_condition{condition="Ready",status="False"} == 1`, for 5 minutes, warning, group
+`meta`) fires for any `ExternalSecret` that is not syncing. The bot's tier-0 table answers it with
+`escalate_human` (restarting an application does not fix a Vault that has lost its data). 16 rules now;
+`promtool` passes, the bot's coverage test passes, 163 tests. On the plain path there is no External
+Secrets, the series does not exist and the rule stays silent.
+
+**Measured on the live stand, silenced so nothing reached Slack or Telegram:**
+
+| What | Result |
+| ---- | ------ |
+| the Vault pod deleted (it forgets everything) | `ExternalSecretNotReady` firing for all three Secrets after **444 s** (the External Secrets refresh interval of 1 minute + the 5-minute `for` + a scrape), received by Alertmanager |
+| `vault-seed.ps1` run | the alert resolved **239 s** after the seed (the refresh interval, the next evaluation and the resolve delay) |
+
+The rule file reached the running Prometheus in 21 s with nobody calling `/-/reload` (section 31).
+
+**Not done.** This tells you that a Secret stopped refreshing; it does not bring Vault's data back by
+itself. The data is still lost on a restart: dev mode keeps it in memory (TODO).
