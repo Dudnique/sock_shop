@@ -33,6 +33,27 @@ configs:
     # Argo CD and Helm fight over that one label.
     application.resourceTrackingMethod: annotation
 
+    # Without this, a child Application's health never reaches the root: the root
+    # reports Healthy while its children are still Progressing, so the sync-wave
+    # annotations on the children are ignored and everything starts at once (seen
+    # on the first GitOps deploy: the bot's Application was Healthy while
+    # sock-shop was still starting). With it, wave 1 waits until wave 0 is Healthy,
+    # which is the order deploy.ps1 has always used: the application and its
+    # network policies before the monitoring that scrapes them.
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      hs.status = "Progressing"
+      hs.message = ""
+      if obj.status ~= nil then
+        if obj.status.health ~= nil then
+          hs.status = obj.status.health.status
+          if obj.status.health.message ~= nil then
+            hs.message = obj.status.health.message
+          end
+        end
+      end
+      return hs
+
 server:
   ingress:
     enabled: true
