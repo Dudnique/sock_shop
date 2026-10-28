@@ -83,6 +83,9 @@ default polling interval; measured: 73 s). To see self-heal, change something Ar
   but the process keeps the old file until `POST /-/reload`
   (`deploy.ps1` does this itself on the plain path). A config-reload sidecar is
   the fix and is not part of this change; see `TODO.md`.
-* A first sync takes about fifteen minutes: the JVM services start their
-  readiness checks at 360-420 s.
+* Under load `sock-shop` shows `Progressing`: the replicas the HPAs add wait up to 7
+  minutes for their readiness probes. That is the autoscaler at work, not a fault.
+* A clean deploy takes about ten minutes, cluster included (measured twice: 10 and
+  11): the JVM services start their readiness checks at 360-420 s, and the waves run
+  one after another.
 * Argo CD adds about 0.35 GB (measured: 201 + 61 + 60 + 5 MiB) to a stand that already uses ~4.6 GB of an 8 GB VM.

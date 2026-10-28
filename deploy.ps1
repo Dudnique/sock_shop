@@ -666,7 +666,7 @@ if ($GitOps) {
     # The root plus one Application per entry of apps/values.yaml (7 always, the
     # bot and the load generator when asked for).
     $expectedApps = 1 + 7 + $(if ($WithAIOps) { 1 } else { 0 }) + $(if ($WithLoadtest) { 1 } else { 0 })
-    Write-Host "    Waiting for $expectedApps Applications to be Synced and Healthy (a first sync takes about 15 minutes: the JVM services start their readiness checks at 360-420 s)..." -ForegroundColor Cyan
+    Write-Host "    Waiting for $expectedApps Applications to be Synced and Healthy (about 10 minutes from an empty machine, measured; the JVM services start their readiness checks at 360-420 s)..." -ForegroundColor Cyan
     $gitopsDeadline = (Get-Date).AddMinutes(40)
     $lastReport = ""
     $allGreen = $false
