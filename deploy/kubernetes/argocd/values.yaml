@@ -1,0 +1,79 @@
+# Values for the argo-cd Helm chart (argo/argo-cd 10.11.6 = Argo CD v3.5.6).
+# deploy.ps1 -GitOps installs it; nothing else in this directory needs editing
+# to change what the stand runs - that is what git is for.
+#
+# Only what a single-node laptop stand needs is on. Everything that is off is
+# off for a stated reason, so that nobody switches it back on out of habit.
+
+# No SSO on a stand with one admin account: dex is a whole extra Deployment
+# (and a database of its own) that would sit idle.
+dex:
+  enabled: false
+
+# Notifications are the job of Alertmanager and the triage bot here; a second
+# notifier for sync events would be a second place to configure Telegram.
+notifications:
+  enabled: false
+
+# The ApplicationSet controller is not used: the stand has one app-of-apps
+# (deploy/kubernetes/argocd/apps), which is plain Applications. The chart has
+# no `enabled` switch for this component, so it stays rendered at zero replicas.
+applicationSet:
+  replicas: 0
+
+configs:
+  params:
+    # Argo CD serves HTTPS by default. Behind Traefik (which terminates the
+    # connection on this stand) that means a redirect loop, so the API server
+    # speaks plain HTTP and the ingress below is the only way in.
+    server.insecure: true
+  cm:
+    # Annotation tracking (the default in Argo CD 3) is stated, not assumed: the
+    # chart sets `app.kubernetes.io/instance` itself, and label tracking would make
+    # Argo CD and Helm fight over that one label.
+    application.resourceTrackingMethod: annotation
+
+    # Without this, a child Application's health never reaches the root: the root
+    # reports Healthy while its children are still Progressing, so the sync-wave
+    # annotations on the children are ignored and everything starts at once (seen
+    # on the first GitOps deploy: the bot's Application was Healthy while
+    # sock-shop was still starting). With it, wave 1 waits until wave 0 is Healthy,
+    # which is the order deploy.ps1 has always used: the application and its
+    # network policies before the monitoring that scrapes them.
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      hs.status = "Progressing"
+      hs.message = ""
+      if obj.status ~= nil then
+        if obj.status.health ~= nil then
+          hs.status = obj.status.health.status
+          if obj.status.health.message ~= nil then
+            hs.message = obj.status.health.message
+          end
+        end
+      end
+      return hs
+
+server:
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    hostname: argocd.localhost
+  resources:
+    requests: {cpu: 20m, memory: 96Mi}
+    limits: {memory: 256Mi}
+
+controller:
+  resources:
+    requests: {cpu: 50m, memory: 192Mi}
+    limits: {memory: 512Mi}
+
+repoServer:
+  resources:
+    requests: {cpu: 20m, memory: 128Mi}
+    limits: {memory: 384Mi}
+
+redis:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}

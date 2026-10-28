@@ -1,0 +1,5 @@
+apiVersion: v2
+name: sock-shop-apps
+description: App-of-apps - one Argo CD Application per directory deploy.ps1 applies.
+type: application
+version: 0.1.0

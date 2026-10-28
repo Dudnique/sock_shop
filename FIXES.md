@@ -1941,3 +1941,49 @@ covered by the unit tests only; the first live retries will show up in `aiops_sc
 
 Tests: 156 (was 136), all standard library. Not covered: a pod whose owner is not a Deployment (a
 Job, a StatefulSet) is reported as a named gap and escalates; there is no tier-0 action for it.
+
+## 30. Argo CD: the stand deployed from git, and the sync waves that were silently ignored
+
+**What was added.** `deploy.ps1 -GitOps` creates the cluster and the three Secrets (they are not in
+git), installs Argo CD from the pinned `argo-cd` chart (10.11.6 = v3.5.6) and applies one root
+Application. The root renders one Application per directory the script applies (`sock-shop` from the
+Helm chart, the `manifests-*` directories, autoscaling, policies), with automated sync, prune and
+selfHeal. Argo CD runs without dex, notifications and the ApplicationSet controller: four pods,
+**about 0.35 GB** in total (measured 201 + 61 + 60 + 5 MiB). The plain path and `-Helm` are
+unchanged, so the parity gate between the chart and `manifests/` still means what it did.
+`check-apps.py` runs in CI and fails when `deploy.ps1` applies a directory with no Application, or
+the reverse; its first run caught my own new line (`$argoDir` looks like an applied directory) and a
+negative test (an Application removed) turns it red.
+
+**Verified on a live stand, clean from an empty machine, twice** (10 and 11 minutes, cluster
+included): all nine Applications `Synced/Healthy`, 33 of 33 Prometheus targets up, no pod outside
+`Running`. Behaviour of the GitOps loop, measured:
+
+| What was done | What Argo CD did |
+| ------------- | ---------------- |
+| `kubectl set image deploy/payment ...:0.4.2` (drift) | reverted to the git value in under 10 s |
+| `kubectl delete svc payment` | recreated in 8 s |
+| `kubectl scale deploy/payment --replicas=3` | **not** reverted, by design (`ignoreDifferences` on `/spec/replicas`: the HPAs own it) |
+| a commit pushed to the branch (a comment in the alert rules) | applied to the ConfigMap in 73 s, with no command from me |
+
+**The waves were silently ignored.** The first deploy finished green, and the log showed the bot's
+Application `Healthy` while `sock-shop` was still `Progressing`: everything had started at once. Argo
+CD does not assess the health of an `Application` object unless told to, so the root is always
+Healthy and the `sync-wave` annotations on the children do nothing. The order matters on this stand:
+`deploy.ps1` applies the network policies before the monitoring that scrapes the application, because
+a policy that arrives after the first scrape left dead targets until the next rollout. That run had
+0 down targets without any ordering, so the risk was not seen, only reasoned about; the health check
+was added anyway (a Lua `resource.customizations.health.argoproj.io_Application` in `values.yaml`).
+The second deploy showed the intended order: wave 0 (`sock-shop`, `network-policies`) `Healthy` first,
+then `autoscaling`, `logging`, `tracing`, then `monitoring`, `alerting`, then the bot. The first
+README said a clean deploy takes "about fifteen minutes"; measured, it is ten.
+
+**Not done, and why.** Prometheus and Alertmanager do not reload their config on their own, so a
+rule changed through git reaches the ConfigMap but not the running process until `POST /-/reload`
+(on the plain path `deploy.ps1` does it); a reload sidecar is the fix (TODO, section 2). The
+Secrets are still created by the script: a GitOps stand needs sealed-secrets or an external secret
+store for that, which is a separate decision. A grafana check right after a clean deploy shows empty
+panels, as on every cold stand (5 of 92 empty); after about ten minutes of load it is
+**92 queries, 0 empty**, the same as on the other two paths. Under load the `sock-shop`
+Application shows `Progressing` while the HPA-added replicas wait for their readiness probes,
+so the root is not always green on a stand that is being loaded; that is the autoscaler, not a fault.

@@ -6,6 +6,13 @@ metadata:
   labels:
     app: grafana
     component: import-dashboards
+  # For Argo CD (deploy.ps1 -GitOps). A Job spec is immutable, so a plain re-sync
+  # of an existing Job fails; as a Sync hook the Job is created anew on every
+  # sync and the previous one is deleted first - the same thing deploy.ps1 does
+  # by hand with `kubectl delete job` before `kubectl apply`. Ignored by kubectl.
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   # Retry a few times in case Grafana is briefly unavailable.
   backoffLimit: 10

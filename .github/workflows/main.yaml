@@ -237,6 +237,19 @@ jobs:
         python3 -m pip install --quiet pyyaml
         python3 deploy/kubernetes/helm-chart/check-parity.py rendered.yaml \
           deploy/kubernetes/manifests
+    # The GitOps mode (deploy.ps1 -GitOps) is a second description of the same
+    # stand: one Argo CD Application per directory the script applies. The chart
+    # must render, and check-apps.py fails when the script applies a directory
+    # that has no Application (or the other way round), so the two cannot drift.
+    - name: Validate the Argo CD app-of-apps
+      run: |
+        helm lint deploy/kubernetes/argocd/apps --strict
+        helm template apps deploy/kubernetes/argocd/apps \
+          --set aiops.enabled=true --set loadtest.enabled=true > apps-rendered.yaml
+        docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:v0.8.0 \
+          -strict -summary -ignore-missing-schemas /work/apps-rendered.yaml
+        python3 -m pip install --quiet pyyaml
+        python3 deploy/kubernetes/argocd/check-apps.py
 
   # ---------------------------------------------------------------------------
   # 5) Terraform static checks (no cloud and no Docker required).
