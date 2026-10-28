@@ -60,6 +60,15 @@ apps:
       version: 2.14.0
       values:
         installCRDs: true
+        # A Service for the metrics port, annotated the way the existing
+        # `kubernetes-service-endpoints` job of Prometheus looks for targets, so the
+        # ExternalSecretNotReady rule has a series to read.
+        metrics:
+          service:
+            enabled: true
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "8080"
         resources:
           requests: {cpu: 20m, memory: 48Mi}
           limits: {memory: 192Mi}

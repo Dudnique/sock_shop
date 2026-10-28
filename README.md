@@ -26,7 +26,7 @@ point: the interesting work here is the *shape* of the platform, not the traffic
 |---|---|
 | A reproducible k3s/k3d cluster defined in Terraform, brought up by one command (`.\deploy.ps1`) | A cloud cluster: no cloud account, no managed control plane, no load balancer |
 | 14 workloads (8 services + 5 databases + RabbitMQ), Ingress, 8 HPA, 17 NetworkPolicy | Multi-tenant: one operator, one namespace per layer, no dev/stage/prod separation |
-| All three observability pillars wired end to end: 15 alert rules in 4 groups, 7 dashboards, 3 data sources | Production durability: Prometheus TSDB is on `emptyDir`, Jaeger is in-memory, Loki is on `emptyDir`, so logs live only as long as its pod |
+| All three observability pillars wired end to end: 16 alert rules in 4 groups, 7 dashboards, 3 data sources | Production durability: Prometheus TSDB is on `emptyDir`, Jaeger is in-memory, Loki is on `emptyDir`, so logs live only as long as its pod |
 | Alerts that carry `namespace/deployment/pod` and a runbook command, delivered to Telegram **and** Slack | An on-call rota, escalation policy, error budgets or SLO reporting |
 | An AIOps triage bot that validates LLM output against a whitelist and acts only through a scoped ServiceAccount | Anything touching real user data: no PII, no payment integration, no real customers |
 | 136 automated tests for the bot, plus CI gates (`kubeconform`, `helm lint`, chart↔manifest parity, `terraform validate`, `promtool`) | A secret store: `Secret` objects plus a git-ignored local file, no Vault, no sealed-secrets |
@@ -399,7 +399,7 @@ admin login keeps guarding edits.
 |---|---|---|
 | Metrics | Prometheus <http://localhost:9090> | app targets are auto-discovered from pod/Service annotations; plus `node-exporter` (3 nodes) and `kube-state-metrics` |
 | Dashboards | Grafana <http://grafana.localhost:8080> | 7 dashboards and 3 datasources imported by the `grafana-import-dashboards` Job |
-| Alerts | Prometheus rules + Alertmanager <http://localhost:9093> | 15 rules in 4 groups - `availability`, `application`, `infrastructure`, `meta`; delivered to Telegram and Slack |
+| Alerts | Prometheus rules + Alertmanager <http://localhost:9093> | 16 rules in 4 groups - `availability`, `application`, `infrastructure`, `meta`; delivered to Telegram and Slack |
 | Probes | `blackbox-exporter` | two paths, labelled `probe_scope`: `ingress` (Traefik Service) and `external` (the published port, `host.docker.internal:8080`) |
 | Logs | Loki (only through Grafana **Explore**) | no UI and no host port on purpose |
 
