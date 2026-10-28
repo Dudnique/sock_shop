@@ -1,0 +1,36 @@
+# The Secret `grafana-admin` that the Grafana Deployment and the dashboard import
+# Job read (21-grafana-dep.yaml, 23-grafana-import-dash-batch.yaml), built from
+# Vault: secret/sock-shop/grafana. This file says WHERE the values live; the
+# values themselves are never in git.
+#
+# refreshInterval: External Secrets reads Vault again every minute, so a value
+# changed in Vault reaches the Secret within about that long. (Grafana keeps the
+# admin password in its own database after first start, so changing it in Vault
+# alone does not change the login of a running Grafana.)
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: grafana-admin
+  namespace: monitoring
+spec:
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: vault
+  target:
+    name: grafana-admin
+    # Owner: this ExternalSecret creates and owns the Secret. Retain: if Vault
+    # loses its data (dev mode forgets everything on a restart) the Secret that
+    # is already in the cluster stays, so a running stand does not lose its
+    # credentials; it only stops refreshing until Vault is seeded again.
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: admin-user
+      remoteRef:
+        key: sock-shop/grafana
+        property: admin-user
+    - secretKey: admin-password
+      remoteRef:
+        key: sock-shop/grafana
+        property: admin-password

@@ -17,9 +17,11 @@
 #   It prints the resulting URLs.
 #
 # GITOPS MODE (-GitOps): steps 2-7 are not run by this script. It creates the
-# cluster and the secrets (which are not in git), installs Argo CD with Helm and
-# applies one root Application; Argo CD then deploys every directory from this
-# repository (deploy\kubernetes\argocd). -GitRevision <branch> makes it read a
+# cluster, installs Argo CD with Helm and applies one root Application; Argo CD
+# then deploys every directory from this repository (deploy\kubernetes\argocd),
+# including Vault and External Secrets. The secrets are NOT created here any more:
+# once Vault is up, deploy\vault-seed.ps1 writes them into it from the same local
+# file, and External Secrets turns them into the Kubernetes Secrets. -GitRevision <branch> makes it read a
 # branch instead of main, which is how a change is tried before it is merged.
 #
 # The cluster is deliberately NOT created with `k3d cluster create` here: that
@@ -77,8 +79,8 @@ param(
     # owned by an earlier `kubectl apply` (helm refuses to adopt them).
     [switch]$Helm,
     # Optional: let Argo CD deploy the stand from git instead of this script
-    # applying the manifests (deploy\kubernetes\argocd). The cluster, the secrets
-    # and the AIOps image are still created here - they are not in git. The
+    # applying the manifests (deploy\kubernetes\argocd). The cluster and the AIOps
+    # image are still created here; the secrets go into Vault (vault-seed.ps1). The
     # application comes from the Helm chart, so -Helm is not needed (and refused).
     [switch]$GitOps,
     # The branch or tag Argo CD reads in -GitOps mode. `main` unless a change is
@@ -429,6 +431,13 @@ if (-not $GitOps) {
 # shell/URL metacharacters), which is why a plain UUID is used.
 kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-monitoring\00-monitoring-ns.yaml") | Out-Null
 
+if ($GitOps) {
+    # The Secret is built by External Secrets from Vault; vault-seed.ps1 fills
+    # Vault (below) and returns the password for the summary.
+    $grafanaUser = if ($env:GRAFANA_ADMIN_USER) { $env:GRAFANA_ADMIN_USER } else { "admin" }
+    $grafanaPassword = ""
+    $grafanaPasswordGenerated = $false
+} else {
 $grafanaUser = if ($env:GRAFANA_ADMIN_USER) { $env:GRAFANA_ADMIN_USER } else { "admin" }
 $grafanaPassword = $env:GRAFANA_ADMIN_PASSWORD
 $grafanaPasswordGenerated = $false
@@ -449,6 +458,7 @@ kubectl -n monitoring create secret generic grafana-admin `
     --from-literal=admin-user=$grafanaUser `
     --from-literal=admin-password=$grafanaPassword `
     --dry-run=client -o yaml | kubectl apply -f -
+}
 
 if (-not $GitOps) { kubectl apply -f (Join-Path $PSScriptRoot "deploy\kubernetes\manifests-monitoring") }
 
@@ -463,6 +473,14 @@ Write-Host "==> 8/8 Alerting" -ForegroundColor Cyan
 # Get-ClusterSecretValue: kubectl returns them base64-encoded) and applied again
 # idempotently - rendered client-side, because a plain `kubectl create` fails on the
 # second run. Nothing is asked of a human and nothing is typed on a command line.
+if ($GitOps) {
+    # No cluster Secret to fall back on and nothing to create here: the values go
+    # into Vault, so they must be available now.
+    if (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:SLACK_WEBHOOK_URL) {
+        throw ("-GitOps needs TELEGRAM_BOT_TOKEN and SLACK_WEBHOOK_URL (they are written into Vault): " +
+               "set them in deploy\secrets.local.ps1 (git-ignored; see README, section Secrets).")
+    }
+} else {
 $alertingSecretExists = (Invoke-QuietProbe -Arguments @(
     "-n", "monitoring", "get", "secret", "alertmanager-secrets", "-o", "name")).ExitCode -eq 0
 
@@ -491,6 +509,8 @@ if ($env:TELEGRAM_BOT_TOKEN -and $env:SLACK_WEBHOOK_URL) {
     throw ("alertmanager-secrets is missing and no credentials are available. " +
            "Create deploy\secrets.local.ps1 (it is git-ignored; see README, section Secrets) " +
            "and set $env:TELEGRAM_BOT_TOKEN and $env:SLACK_WEBHOOK_URL in it - there is no need to type a token on a command line.")
+}
+
 }
 
 # note: examples/ is a sub-directory, and `kubectl apply -f <dir>` is NOT
@@ -603,6 +623,7 @@ if ($WithAIOps) {
     # and never typed as a literal on a command line. Missing everywhere is not an
     # error: the bot comes up on the rules-only path and says so in /healthz and
     # on every card, which is a better outcome than a failed deploy.
+    if (-not $GitOps) {
     $llmSecretExists = (Invoke-QuietProbe -Arguments @(
         "-n", "monitoring", "get", "secret", "aiops-llm", "-o", "name")).ExitCode -eq 0
     if (-not $env:DEEPSEEK_API_KEY -and $llmSecretExists) {
@@ -619,6 +640,7 @@ if ($WithAIOps) {
     } else {
         Write-Host "    No DEEPSEEK_API_KEY in the environment or in $secretsFile - deploying the rules-only path." -ForegroundColor Yellow
         Write-Host "    The bot still triages; /healthz will report the model tier as unavailable." -ForegroundColor Yellow
+    }
     }
 
     # note: examples/ is a sub-directory, and `kubectl apply -f <dir>` is NOT
@@ -663,9 +685,28 @@ if ($GitOps) {
     $root | kubectl apply -f -
     if ($LASTEXITCODE -ne 0) { throw "applying the root Application failed (exit $LASTEXITCODE)" }
 
-    # The root plus one Application per entry of apps/values.yaml (7 always, the
-    # bot and the load generator when asked for).
-    $expectedApps = 1 + 7 + $(if ($WithAIOps) { 1 } else { 0 }) + $(if ($WithLoadtest) { 1 } else { 0 })
+    # Vault is the first Application (wave -3) and External Secrets the second;
+    # everything else waits behind them. As soon as the Vault pod is Ready it is
+    # empty: fill it now, and the waves can proceed. Order matters: seeding any
+    # later would leave the ExternalSecrets failing and the waves stuck.
+    Write-Host "    Waiting for the Vault pod, then writing the secrets into it (deploy\vault-seed.ps1)..." -ForegroundColor Cyan
+    $vaultDeadline = (Get-Date).AddMinutes(10)
+    $vaultUp = $false
+    while ((Get-Date) -lt $vaultDeadline) {
+        $vp = Invoke-QuietProbe -Arguments @("-n", "vault", "get", "pod", "vault-0",
+            "-o", "jsonpath={.status.containerStatuses[0].ready}")
+        if ($vp.ExitCode -eq 0 -and "$($vp.Output)".Trim() -eq "true") { $vaultUp = $true; break }
+        Start-Sleep -Seconds 5
+    }
+    if (-not $vaultUp) {
+        throw "Vault did not become Ready within 10 minutes. See: kubectl -n argocd get application vault"
+    }
+    $grafanaPassword = & (Join-Path $PSScriptRoot "deploy\vault-seed.ps1") | Select-Object -Last 1
+
+    # The root plus one Application per entry of apps/values.yaml (10 always: Vault,
+    # External Secrets and the ExternalSecrets among them; the bot and the load
+    # generator when asked for).
+    $expectedApps = 1 + 10 + $(if ($WithAIOps) { 1 } else { 0 }) + $(if ($WithLoadtest) { 1 } else { 0 })
     Write-Host "    Waiting for $expectedApps Applications to be Synced and Healthy (about 10 minutes from an empty machine, measured; the JVM services start their readiness checks at 360-420 s)..." -ForegroundColor Cyan
     $gitopsDeadline = (Get-Date).AddMinutes(40)
     $lastReport = ""
@@ -720,7 +761,8 @@ if ($grafanaPasswordGenerated) {
     # look it up" turned out to be exactly the step people get stuck on (the
     # Secret is base64, the Service is ClusterIP, and the UI needs a hosts entry).
     # Set GRAFANA_ADMIN_PASSWORD to pick your own value instead.
-    Write-Host ("    Grafana admin password (from the existing grafana-admin Secret): {0}" -f $grafanaPassword) -ForegroundColor Yellow
+    $pwSource = if ($GitOps) { "from Vault, secret/sock-shop/grafana" } else { "from the existing grafana-admin Secret" }
+    Write-Host ("    Grafana admin password ({0}): {1}" -f $pwSource, $grafanaPassword) -ForegroundColor Yellow
 }
 if ($GitOps) {
     $argoPassword = Get-ClusterSecretValue -Namespace argocd -SecretName argocd-initial-admin-secret -Key password
@@ -728,4 +770,7 @@ if ($GitOps) {
     Write-Host  "              needs '127.0.0.1 argocd.localhost' in your hosts file; without it:"
     Write-Host  "              kubectl port-forward -n argocd svc/argocd-server 8090:80  ->  http://localhost:8090"
     Write-Host ("    Argo CD admin password (argocd-initial-admin-secret): {0}" -f $argoPassword) -ForegroundColor Yellow
+    Write-Host  "  Vault       kubectl port-forward -n vault svc/vault 8200:8200  ->  http://localhost:8200"
+    Write-Host  "              dev mode: login with the token 'root'; the secrets are under secret/sock-shop"
+    Write-Host  "              (dev mode forgets everything on a restart: run deploy\vault-seed.ps1 again)"
 }
