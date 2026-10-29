@@ -29,7 +29,7 @@ point: the interesting work here is the *shape* of the platform, not the traffic
 | All three observability pillars wired end to end: 16 alert rules in 4 groups, 7 dashboards, 3 data sources | Production durability: Prometheus TSDB is on `emptyDir`, Jaeger is in-memory, Loki is on `emptyDir`, so logs live only as long as its pod |
 | Alerts that carry `namespace/deployment/pod` and a runbook command, delivered to Telegram **and** Slack | An on-call rota, escalation policy, error budgets or SLO reporting |
 | An AIOps triage bot that validates LLM output against a whitelist and acts only through a scoped ServiceAccount | Anything touching real user data: no PII, no payment integration, no real customers |
-| 136 automated tests for the bot, plus CI gates (`kubeconform`, `helm lint`, chart↔manifest parity, `terraform validate`, `promtool`) | A secret store: `Secret` objects plus a git-ignored local file, no Vault, no sealed-secrets |
+| 163 automated tests for the bot, plus CI gates (`kubeconform`, `helm lint`, chart↔manifest parity, `terraform validate`, `promtool`) | A hardened secret store: Vault is real (data on a volume, sealed at start, no public root token) but it is one pod with one key, and the plain path still uses `Secret` objects plus a git-ignored local file |
 | Incidents found and fixed on the way, written up with the reasoning ([FIXES.md](./FIXES.md)) | Proof that you can carry a pager. A lab cannot prove that, and it should not pretend to |
 
 Everything above is deliberate scoping, not a gap I am unaware of.
@@ -44,17 +44,20 @@ lab — in production the same stand would look like this:
 2. **etcd backups and a rehearsed upgrade.** Today a cluster loss costs a re-deploy; in
    production it needs scheduled snapshots, a restore tested on a timer, and an upgrade
    plan with a pinned rollback version.
-3. **External secrets with rotation.** Keeping them out of git is the floor, not the
-   ceiling: Vault / External Secrets / SOPS, per-namespace scope, rotation on a schedule.
+3. **A production-shaped Vault.** Vault with External Secrets is already here
+   (`deploy.ps1 -GitOps`, [FIXES §32-34](./FIXES.md)); production adds three or five
+   pods, a key split between people or KMS auto-unseal, audit logs, per-namespace scope
+   and rotation on a schedule.
 4. **Persistence with a backup story.** `emptyDir` for Prometheus is a demo choice;
    production needs a PVC, a retention policy and a restore procedure for the TSDB —
    losing history after an incident is how you lose the incident.
 5. **Identity instead of static RBAC.** OIDC/SSO groups mapped to roles, no long-lived
    kubeconfigs, one ServiceAccount per workload, and audit logs shipped where the
    cluster admin cannot delete them.
-6. **GitOps instead of a deploy script.** `deploy.ps1` is deliberately a *learning*
-   artefact: it shows every step out loud. Production wants Argo CD/Flux, image digests
-   instead of tags, and a rollback that is a `git revert`.
+6. **GitOps as the only path.** Argo CD is already here (`deploy.ps1 -GitOps`, app of
+   apps, sync waves, [FIXES §30](./FIXES.md)), but `deploy.ps1` stays a *learning*
+   artefact that shows every step out loud. Production drops the script, pins image
+   digests instead of tags, and rolls back with a `git revert`.
 7. **SLOs, error budgets and on-call.** The rules exist, but a page is a process:
    severity levels, escalation, runbooks executed at least once, blameless postmortems.
 8. **Cost and capacity as a signal.** Requests and limits are set, but nothing reports
@@ -428,7 +431,7 @@ kubectl port-forward -n sock-shop svc/front-end 8081:80
 ├── FIXES.md                                # what was fixed and why (EN)
 ├── FIXES.ru.md                             # what was fixed and why (RU)
 ├── aiops/
-│   └── triage-bot/                         # AIOps M1 advisor: code, 136 tests, run-local.ps1
+│   └── triage-bot/                         # AIOps M1 advisor: code, 163 tests, run-local.ps1
 ├── deploy/
 │   ├── grafana_check.py                    # runs every dashboard query through Grafana, reports the empty ones
 │   └── kubernetes/

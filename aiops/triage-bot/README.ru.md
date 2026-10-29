@@ -422,7 +422,7 @@ triage-бот, который молча перестал работать, ху
 
 ```powershell
 cd aiops\triage-bot
-python -m unittest discover -s tests -t . -v      # 136 тестов, секунды, без сети
+python -m unittest discover -s tests -t . -v      # 163 теста, секунды, без сети
 ```
 
 | Файл тестов | Что он фиксирует |
