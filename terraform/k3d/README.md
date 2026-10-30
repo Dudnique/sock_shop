@@ -10,8 +10,9 @@ removes it.
 
 The cluster becomes **reproducible infrastructure as code** instead of a sequence
 of shell commands someone has to remember. Delete it, `apply` again, and you get
-the exact same cluster. It also demonstrates the same workflow used for real
-cloud infrastructure (see `terraform/aws-state/` for the AWS state backend).
+the exact same cluster. It is also the same workflow that real
+cloud infrastructure would use; the AWS part (remote state in S3 with DynamoDB locking, EKS)
+is planned, not written yet (see `TODO.md`).
 
 ## Requirements
 
